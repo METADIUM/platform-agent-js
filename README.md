@@ -90,7 +90,50 @@ await auth.start();
 await fetch(process.env.BRIEFICK_URL + "/api/mcp", { headers: auth.authHeader() });
 ```
 
-## 흐름 (Briefick 계약)
+## 라이브러리 API — import해서 bearer 받기
+
+프로그램적 진입점: **ESM `dist/index.js` + 타입 `dist/index.d.ts`**. bearer는 `AgentAuth`(자동 갱신) 또는
+`AgentClient.exchange`(1회)로 받는다.
+
+```ts
+import { AgentKey, AgentClient, AgentAuth, loadStore, defaultKeyFile } from "@metadium-did/platform-agent-js";
+
+// CLI가 저장한 키/위임 VC 재사용
+const store = loadStore(defaultKeyFile())!;
+const key = await AgentKey.fromPrivateJwk(store.privateJwk);
+const client = new AgentClient({ baseUrl: "https://briefick.cplabs.io", key });
+const credential = store.credentials!["https://briefick.cplabs.io"]; // 회수·저장된 위임 VC
+
+// (a) 자동 갱신 — bearer()/authHeader()
+const auth = new AgentAuth({ client, credential });
+await auth.start();
+auth.bearer();        // string  — 현재 세션 bearer
+auth.authHeader();    // { Authorization: "Bearer …" }
+auth.stop();
+
+// (b) 1회 교환
+const r = await client.exchange(credential);  // { status:"issued", bearer, expiresAt, scope }
+```
+
+### 서비스 중립 (다른 RP)
+
+`AgentClient`는 엔드포인트 경로·PoP `aud`를 **설정으로 받는다**(기본값 = Briefick 계약). 다른 서비스는 `service`만 지정:
+
+```ts
+new AgentClient({ baseUrl, key, service: {
+  registerPath: "/v2/agents/enroll",
+  retrievePath: "/v2/agents/delegation",
+  sessionStartPath: "/v2/agents/session/start",
+  sessionCompletePath: "/v2/agents/session/complete",
+  popAudience: { register: "acme-enroll", retrieve: "acme-retrieve", session: "acme-session" },
+  mcpPath: "/v2/mcp",
+}});
+```
+
+`BriefickAgentClient`는 기본값 프리셋 별칭(`=== AgentClient`)이라 하위호환된다. 홀더 암호(`AgentKey`·`presentVpToken`)·
+`AgentAuth`·`startProxy`는 서비스와 무관한 범용 코어다.
+
+## 흐름 (Briefick 기본 계약)
 
 ```text
 등록   POST /api/agent/register          {didJwk, code, pop(aud=briefick-agent-register)}

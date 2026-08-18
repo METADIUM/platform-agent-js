@@ -13,9 +13,14 @@ export {
   type PresentOptions,
 } from "./present.js";
 export {
-  BriefickAgentClient,
+  AgentClient,
+  AgentClientError,
+  BriefickAgentClient, // 별칭(Briefick 기본 계약)
   BriefickAgentError,
+  DEFAULT_SERVICE,
   POP_AUDIENCE,
+  type AgentClientOptions,
+  type AgentServiceConfig,
   type BriefickClientOptions,
   type DelegationRetrieval,
   type SessionStart,
@@ -23,3 +28,4 @@ export {
 } from "./briefick.js";
 export { AgentAuth, type AgentAuthOptions } from "./agent.js";
 export { startProxy, type ProxyOptions, type RunningProxy, type BearerSource } from "./proxy.js";
+export { defaultKeyFile, loadStore, saveStore, type KeyStore } from "./keystore.js";
