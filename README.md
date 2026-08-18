@@ -31,6 +31,28 @@ npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세�
 **자동으로 재등록을 건너뛴다**(다시 하려면 `--force`). 경로 변경: `--key-file <PATH>` 또는 `METAPASS_AGENT_KEY_FILE`.
 개인키는 이 파일에만 있고 네트워크로 나가지 않는다.
 
+## 로컬 프록시 모드 — Claude Code 연동 (방식 b)
+
+Claude Code(MCP 클라이언트)는 **고정 Authorization 헤더**만 지원하는데 위임 bearer는 짧은 TTL로 갱신된다.
+로컬 프록시를 띄우면 "고정 헤더 → 최신 bearer 주입"으로 궁합을 맞춘다.
+
+```text
+Claude Code ──(고정 헤더, localhost)──▶ 프록시 ──(최신 bearer 주입)──▶ https://…/api/mcp
+```
+
+```bash
+# 1) 프록시 실행(포그라운드) — 저장된 위임 VC로 세션 bearer 자동 갱신·주입
+npx @metadium-did/platform-agent-js proxy --url <BRIEFICK_URL> [--port 8787]
+
+# 2) Claude Code에 그 로컬 프록시를 MCP로 등록(다른 터미널)
+claude mcp add --transport http briefick http://127.0.0.1:8787/mcp
+```
+
+- **127.0.0.1 전용**(로컬), 기본 포트 **8787**(`--port`), 대상 MCP 경로 기본 `/api/mcp`(`--mcp-path`).
+- **투명 포워딩**: 메서드·본문·헤더·응답 스트림(**SSE 포함**) 그대로, `Authorization`만 최신 bearer로 덮어쓴다.
+- **만료/철회**: RP가 401/거부를 내면 프록시는 **그대로 전달**(자체 판단 안 함). bearer는 계속 갱신되므로 다음 요청은 새 토큰.
+- **포그라운드 실행**(Ctrl+C 종료). 상시 데몬은 `launchd`/`pm2` 등으로 감싸면 됨. 첫 실행 시 위임 VC 회수(지갑 승인) 후 `~/.metapass-agent/key.json`에 저장 → 재기동 시 재회수 불필요.
+
 ## 설치 (라이브러리)
 
 ```bash

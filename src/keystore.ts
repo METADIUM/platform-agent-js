@@ -13,6 +13,8 @@ export interface KeyStore {
   privateJwk: JWK;
   /** URL별 등록 여부 — 재등록 스킵 판단. */
   registrations?: Record<string, boolean>;
+  /** URL별 회수한 위임 VC(SD-JWT VC) — 프록시/세션 재기동 시 재회수 방지. */
+  credentials?: Record<string, string>;
 }
 
 /** 기본 키 파일 경로. `METAPASS_AGENT_KEY_FILE` 우선. */

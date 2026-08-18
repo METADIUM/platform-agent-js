@@ -10,6 +10,8 @@
  */
 import { AgentKey } from "./key.js";
 import { BriefickAgentClient } from "./briefick.js";
+import { AgentAuth } from "./agent.js";
+import { startProxy } from "./proxy.js";
 import { defaultKeyFile, loadStore, saveStore, type KeyStore } from "./keystore.js";
 
 interface Args {
@@ -18,6 +20,8 @@ interface Args {
   code?: string;
   keyFile: string;
   force: boolean;
+  port?: number;
+  mcpPath?: string;
 }
 
 function parse(argv: string[]): Args {
@@ -28,6 +32,8 @@ function parse(argv: string[]): Args {
     if (a === "--url") out.url = argv[++i];
     else if (a === "--code") out.code = argv[++i];
     else if (a === "--key-file") out.keyFile = argv[++i];
+    else if (a === "--port") out.port = Number(argv[++i]);
+    else if (a === "--mcp-path") out.mcpPath = argv[++i];
     else if (a === "--force") out.force = true;
     else if (a === "-h" || a === "--help") out.cmd = "help";
     else rest.push(a);
@@ -50,16 +56,41 @@ async function keyFrom(file: string): Promise<{ key: AgentKey; store: KeyStore; 
   return { key, store, created: true };
 }
 
-const HELP = `platform-agent — AI 에이전트 위임 등록/세션 CLI
+/** 위임 VC 확보 — 저장돼 있으면 재사용, 없으면 회수(지갑 승인 대기) 후 저장. */
+async function ensureCredential(
+  client: BriefickAgentClient,
+  store: KeyStore,
+  url: string,
+  keyFile: string,
+): Promise<string> {
+  const stored = store.credentials?.[url];
+  if (stored) return stored;
+  console.error("위임 VC 회수 대기(지갑에서 승인 필요)…");
+  const cred = await client.waitForDelegation({ timeoutMs: 180_000 });
+  store.credentials = { ...(store.credentials ?? {}), [url]: cred };
+  saveStore(keyFile, store);
+  return cred;
+}
+
+const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 CLI
 
 사용:
   npx @metadium-did/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
+  npx @metadium-did/platform-agent-js proxy    --url <BRIEFICK_URL> [--port 8787]
   npx @metadium-did/platform-agent-js did
-  npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>
+  npx @metadium-did/platform-agent-js session  --url <BRIEFICK_URL>
+
+명령:
+  register   페어링 코드로 에이전트 등록(최초 1회)
+  proxy      로컬 MCP 프록시 실행(고정 헤더 → 최신 bearer 주입). Claude Code는 이 프록시를 MCP로 등록.
+  did        이 에이전트 did:jwk 출력
+  session    위임 세션 bearer 1회 발급(stdout)
 
 옵션:
   --url <URL>        Briefick 베이스 URL (또는 env BRIEFICK_URL)
   --code <CODE>      /publish 페어링 코드 (또는 env PAIRING_CODE) — register 최초 1회만
+  --port <N>         proxy 리슨 포트 (기본 8787, 127.0.0.1 전용)
+  --mcp-path <PATH>  RP MCP 경로 (기본 /api/mcp)
   --key-file <PATH>  키 파일 경로 (기본 ~/.metapass-agent/key.json, env METAPASS_AGENT_KEY_FILE)
   --force            이미 등록됐어도 재등록`;
 
@@ -100,14 +131,47 @@ export async function main(argv: string[]): Promise<number> {
 
   if (args.cmd === "session") {
     if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
-    const { key } = await keyFrom(args.keyFile);
+    const { key, store } = await keyFrom(args.keyFile);
     const client = new BriefickAgentClient({ baseUrl: args.url, key });
-    console.error("위임 VC 회수 대기(지갑 승인 필요)…");
-    const cred = await client.waitForDelegation({ timeoutMs: 180_000 });
+    const cred = await ensureCredential(client, store, args.url, args.keyFile);
     const r = await client.exchange(cred);
     if (r.status !== "issued" || !r.bearer) return fail(`세션 발급 실패: ${r.status}`);
     console.log(r.bearer); // stdout=bearer (파이프 가능), 안내는 stderr
     console.error(`(만료 ${r.expiresAt}, scope ${JSON.stringify(r.scope)})`);
+    return 0;
+  }
+
+  if (args.cmd === "proxy") {
+    if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
+    const { key, store } = await keyFrom(args.keyFile);
+    const client = new BriefickAgentClient({ baseUrl: args.url, key });
+    const credential = await ensureCredential(client, store, args.url, args.keyFile);
+    const auth = new AgentAuth({
+      client,
+      credential,
+      onRefresh: (_b, exp) => console.error(`[proxy] 세션 bearer 갱신 (만료 ${exp.toISOString()})`),
+      onError: (e) => console.error(`[proxy] 세션 갱신 실패(재시도됨): ${e}`),
+    });
+    await auth.start();
+
+    const base = args.url.replace(/\/+$/, "");
+    const targetMcpUrl = base + (args.mcpPath ?? "/api/mcp");
+    const proxy = await startProxy({ auth, targetMcpUrl, port: args.port ?? 8787 });
+
+    console.error(`✅ 로컬 MCP 프록시 실행: ${proxy.url}  →  ${targetMcpUrl}`);
+    console.error(`   에이전트 DID: ${key.did}`);
+    console.error(`\nClaude Code 등록(다른 터미널에서):`);
+    console.error(`   claude mcp add --transport http briefick ${proxy.url}\n`);
+    console.error("(Ctrl+C 로 종료)");
+
+    const stop = async () => {
+      auth.stop();
+      await proxy.close();
+      process.exit(0);
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+    await new Promise<void>(() => {}); // 포그라운드 유지(프록시가 이벤트루프를 잡음)
     return 0;
   }
 
