@@ -1,4 +1,4 @@
-# @metadium/platform-agent-js
+# @metadium-did/platform-agent-js
 
 AI 에이전트(예: Claude Code)가 **위임 VC로 서비스에 인증**하기 위한 Node/TypeScript **홀더 클라이언트 + CLI**.
 정적 API 키를 **스코프드·기한부·철회가능 위임**으로 대체한다([[samples/docs/22]] 시나리오 #8).
@@ -18,10 +18,10 @@ AI 에이전트(예: Claude Code)가 **위임 VC로 서비스에 인증**하기 
 
 ```bash
 # 등록 (최초 1회 — Briefick /publish 페어링 코드)
-npx @metadium/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
+npx @metadium-did/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
 
-npx @metadium/platform-agent-js did                        # 이 에이전트 did:jwk 출력
-npx @metadium/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세션 bearer 1회 발급(stdout)
+npx @metadium-did/platform-agent-js did                        # 이 에이전트 did:jwk 출력
+npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세션 bearer 1회 발급(stdout)
 ```
 
 `--url`/`--code`는 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
@@ -34,13 +34,13 @@ npx @metadium/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세션 b
 ## 설치 (라이브러리)
 
 ```bash
-npm install @metadium/platform-agent-js
+npm install @metadium-did/platform-agent-js
 ```
 
 ## 빠른 시작
 
 ```ts
-import { AgentKey, BriefickAgentClient, AgentAuth } from "@metadium/platform-agent-js";
+import { AgentKey, BriefickAgentClient, AgentAuth } from "@metadium-did/platform-agent-js";
 
 // 1) 에이전트 키(최초 1회 생성 후 파일로 영속 — 같은 did:jwk 유지)
 const key = await AgentKey.generate();

@@ -1,9 +1,9 @@
 /**
  * platform-agent CLI — 레포 clone 없이 `npx`로 에이전트 등록/세션.
  *
- *   npx @metadium/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
- *   npx @metadium/platform-agent-js did          # 이 에이전트 did:jwk 출력
- *   npx @metadium/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세션 bearer 1회 발급
+ *   npx @metadium-did/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
+ *   npx @metadium-did/platform-agent-js did          # 이 에이전트 did:jwk 출력
+ *   npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세션 bearer 1회 발급
  *
  * 키는 `~/.metapass-agent/key.json`에 영속 → **최초 1회만 등록, 이후 재사용**. `--url`/`--code`는
  * 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
@@ -53,9 +53,9 @@ async function keyFrom(file: string): Promise<{ key: AgentKey; store: KeyStore; 
 const HELP = `platform-agent — AI 에이전트 위임 등록/세션 CLI
 
 사용:
-  npx @metadium/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
-  npx @metadium/platform-agent-js did
-  npx @metadium/platform-agent-js session --url <BRIEFICK_URL>
+  npx @metadium-did/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
+  npx @metadium-did/platform-agent-js did
+  npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>
 
 옵션:
   --url <URL>        Briefick 베이스 URL (또는 env BRIEFICK_URL)
