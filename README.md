@@ -1,6 +1,6 @@
-# @metadium/platform-agent
+# @metadium/platform-agent-js
 
-AI 에이전트(예: Claude Code)가 **위임 VC로 서비스에 인증**하기 위한 Node/TypeScript **홀더 클라이언트**.
+AI 에이전트(예: Claude Code)가 **위임 VC로 서비스에 인증**하기 위한 Node/TypeScript **홀더 클라이언트 + CLI**.
 정적 API 키를 **스코프드·기한부·철회가능 위임**으로 대체한다([[samples/docs/22]] 시나리오 #8).
 
 - **did:jwk 키**(ES256/P-256) 생성·보관
@@ -14,16 +14,33 @@ AI 에이전트(예: Claude Code)가 **위임 VC로 서비스에 인증**하기 
 > 런타임(Node/MCP)에 있어야 한다. **홀더 제시 경로만·ES256 전용**으로 표면을 최소화했고, 와이어 포맷은
 > `platform-java`와 크로스검증된다(아래).
 
-## 설치
+## CLI (레포 clone 없이 npx 한 줄)
 
 ```bash
-npm install @metadium/platform-agent
+# 등록 (최초 1회 — Briefick /publish 페어링 코드)
+npx @metadium/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
+
+npx @metadium/platform-agent-js did                        # 이 에이전트 did:jwk 출력
+npx @metadium/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세션 bearer 1회 발급(stdout)
+```
+
+`--url`/`--code`는 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
+
+**키 영속(최초 1회만 등록, 이후 재사용)** — 키는 `~/.metapass-agent/key.json`(권한 0600)에 저장된다.
+재실행 시 같은 did:jwk를 재사용하므로 **매번 새 에이전트로 등록되지 않는다.** `register`는 이미 등록된 URL이면
+**자동으로 재등록을 건너뛴다**(다시 하려면 `--force`). 경로 변경: `--key-file <PATH>` 또는 `METAPASS_AGENT_KEY_FILE`.
+개인키는 이 파일에만 있고 네트워크로 나가지 않는다.
+
+## 설치 (라이브러리)
+
+```bash
+npm install @metadium/platform-agent-js
 ```
 
 ## 빠른 시작
 
 ```ts
-import { AgentKey, BriefickAgentClient, AgentAuth } from "@metadium/platform-agent";
+import { AgentKey, BriefickAgentClient, AgentAuth } from "@metadium/platform-agent-js";
 
 // 1) 에이전트 키(최초 1회 생성 후 파일로 영속 — 같은 did:jwk 유지)
 const key = await AgentKey.generate();
@@ -53,7 +70,7 @@ await fetch(process.env.BRIEFICK_URL + "/api/mcp", { headers: auth.authHeader() 
 
 ## 흐름 (Briefick 계약)
 
-```
+```text
 등록   POST /api/agent/register          {didJwk, code, pop(aud=briefick-agent-register)}
 회수   POST /api/agent/delegation/retrieve {didJwk, pop(aud=briefick-agent-retrieve)}  → {credential}
 세션   POST /api/agent/session/start      {didJwk, pop(aud=briefick-agent-session)}    → {state, nonce, responseUri}
