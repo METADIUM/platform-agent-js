@@ -53,11 +53,25 @@ export interface AgentClientOptions {
   fetchImpl?: FetchLike;
 }
 
+/** retrieve의 미배달 세분화(0.2.2, RP 하위호환 확장) — pending일 때 마지막 발급 요청 상태. */
+export interface DelegationLastRequest {
+  nonce?: string;
+  status?: string;
+  createdAt?: string;
+  expiresAt?: string;
+}
+
 export interface DelegationRetrieval {
-  status: "delivered" | "pending" | "no_agent" | string;
+  /**
+   * delivered=회수 가능 / pending=요청 있음·지갑 승인/전달 대기 / no_request=이 에이전트로
+   * 발급된 위임 없음(엉뚱한 에이전트이거나 미발급) / no_agent=미등록. (구 RP는 no_request 없이
+   * pending만 반환 — 하위호환)
+   */
+  status: "delivered" | "pending" | "no_request" | "no_agent" | string;
   credential?: string;
   scope?: unknown;
   constraints?: unknown;
+  lastRequest?: DelegationLastRequest;
 }
 
 export interface SessionStart {
@@ -141,15 +155,25 @@ export class AgentClient {
     return this.postJson(this.svc.retrievePath, { didJwk: this.key.did, pop });
   }
 
-  /** delivered 될 때까지 회수 폴링(사용자가 지갑에서 승인 완료 대기). */
-  async waitForDelegation(opts: { pollMs?: number; timeoutMs?: number } = {}): Promise<string> {
+  /**
+   * delivered 될 때까지 회수 폴링(사용자가 지갑에서 승인 완료 대기).
+   * onStatus는 상태(또는 pending 대상 요청)가 바뀔 때마다 호출 — CLI 안내 분기용.
+   */
+  async waitForDelegation(
+    opts: { pollMs?: number; timeoutMs?: number; onStatus?: (r: DelegationRetrieval) => void } = {},
+  ): Promise<string> {
     const pollMs = opts.pollMs ?? 2000;
     const deadline = Date.now() + (opts.timeoutMs ?? 120000);
+    let last: DelegationRetrieval | undefined;
     for (;;) {
       const r = await this.retrieveDelegation();
+      if (r.status !== last?.status || r.lastRequest?.nonce !== last?.lastRequest?.nonce) {
+        opts.onStatus?.(r);
+      }
+      last = r;
       if (r.status === "delivered" && r.credential) return r.credential;
       if (r.status === "no_agent") throw new AgentClientError("등록되지 않은 에이전트");
-      if (Date.now() > deadline) throw new AgentClientError("위임 VC 회수 타임아웃(승인 대기)");
+      if (Date.now() > deadline) throw new AgentClientError(retrievalTimeoutMessage(last));
       await sleep(pollMs);
     }
   }
@@ -200,6 +224,22 @@ export class AgentClient {
 export { AgentClient as BriefickAgentClient };
 export { AgentClientError as BriefickAgentError };
 export type { AgentClientOptions as BriefickClientOptions };
+
+/** 마지막 관측 상태로 타임아웃 원인을 구분한다(무음 pending의 조기 진단 — A 항목). */
+function retrievalTimeoutMessage(last?: DelegationRetrieval): string {
+  if (last?.status === "no_request") {
+    return "위임 VC 회수 타임아웃 — 이 에이전트로 발급된 위임 요청이 없습니다(다른 에이전트로 발급했거나 미발급). Briefick /publish에서 에이전트 지문을 대조해 위임을 발급하세요";
+  }
+  if (last?.status === "pending" && last.lastRequest) {
+    const lr = last.lastRequest;
+    const expired = lr.expiresAt !== undefined && Date.parse(lr.expiresAt) < Date.now();
+    return (
+      `위임 VC 회수 타임아웃 — 요청(nonce ${lr.nonce ?? "?"}, ${expired ? "만료됨" : `만료 ${lr.expiresAt ?? "?"}`})은 있으나 ` +
+      "지갑 발급물이 도착하지 않았습니다(지갑 callback 전달 실패 또는 미승인). 지갑에서 재승인하거나 /publish에서 재발급하세요"
+    );
+  }
+  return "위임 VC 회수 타임아웃(승인 대기)";
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));

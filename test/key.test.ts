@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { importJWK, jwtVerify } from "jose";
-import { AgentKey, didJwkFromPublicJwk, publicJwkFromDidJwk } from "../src/key.js";
+import { createHash } from "node:crypto";
+import { AgentKey, didJwkFromPublicJwk, publicJwkFromDidJwk, didFingerprint } from "../src/key.js";
 
 describe("did:jwk (ES256/P-256)", () => {
   it("생성·라운드트립·정준 키순서(crv,kty,x,y)", async () => {
@@ -36,6 +37,17 @@ describe("did:jwk (ES256/P-256)", () => {
     expect(protectedHeader.alg).toBe("ES256");
     expect(payload.code).toBe("ABCD2345");
     expect(typeof payload.iat).toBe("number");
+  });
+
+  it("지문 = sha256(did) hex 앞 10자리 (/publish 표시와 동일)", async () => {
+    const key = await AgentKey.generate();
+    const expected = createHash("sha256").update(key.did, "utf8").digest("hex").slice(0, 10);
+    expect(key.fingerprint).toBe(expected);
+    expect(didFingerprint(key.did)).toBe(expected);
+    expect(key.fingerprint).toMatch(/^[0-9a-f]{10}$/);
+    // 복원해도 같은 지문
+    const k2 = await AgentKey.fromPrivateJwk(key.exportPrivateJwk());
+    expect(k2.fingerprint).toBe(key.fingerprint);
   });
 
   it("EC(P-256) 아닌 키는 거부", () => {

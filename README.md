@@ -26,6 +26,12 @@ npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세�
 
 `--url`/`--code`는 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
 
+`did`/`register`/`proxy`는 에이전트 **지문**(sha256(did:jwk) hex 앞 10자리)을 함께 출력한다 — 모든
+did:jwk는 앞자리가 같아 육안 구분이 안 되므로, Briefick `/publish`가 표시하는 지문과 1:1 대조해
+**어느 에이전트로 발급하는지** 확인한다. 위임 회수 대기 중에는 RP의 세분화 신호로 안내를 분기한다:
+`no_request`(이 에이전트로 발급된 위임 없음 — /publish에서 지문 확인) / `pending`+`lastRequest`(요청
+있음 — 지갑 승인·전달 대기, 타임아웃 시 지갑 callback 전달 실패 의심 안내).
+
 **키 영속(최초 1회만 등록, 이후 재사용)** — 키는 `~/.metapass-agent/key.json`(권한 0600)에 저장된다.
 재실행 시 같은 did:jwk를 재사용하므로 **매번 새 에이전트로 등록되지 않는다.** `register`는 이미 등록된 URL이면
 **자동으로 재등록을 건너뛴다**(다시 하려면 `--force`). 경로 변경: `--key-file <PATH>` 또는 `METAPASS_AGENT_KEY_FILE`.

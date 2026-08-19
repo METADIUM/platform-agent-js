@@ -4,7 +4,7 @@
  * did:jwk 키 · PoP JWT · SD-JWT VC 제시(KB-JWT) · Briefick 위임 인증(등록/회수/세션) · bearer 자동갱신.
  * ES256/P-256 전용, platform-java와 와이어 호환(홀더 제시 경로).
  */
-export { AgentKey, didJwkFromPublicJwk, publicJwkFromDidJwk } from "./key.js";
+export { AgentKey, didJwkFromPublicJwk, publicJwkFromDidJwk, didFingerprint } from "./key.js";
 export {
   presentVpToken,
   splitSdJwt,
@@ -23,6 +23,7 @@ export {
   type AgentServiceConfig,
   type BriefickClientOptions,
   type DelegationRetrieval,
+  type DelegationLastRequest,
   type SessionStart,
   type SessionResult,
 } from "./briefick.js";

@@ -62,11 +62,27 @@ async function ensureCredential(
   store: KeyStore,
   url: string,
   keyFile: string,
+  key: AgentKey,
 ): Promise<string> {
   const stored = store.credentials?.[url];
   if (stored) return stored;
   console.error("위임 VC 회수 대기(지갑에서 승인 필요)…");
-  const cred = await client.waitForDelegation({ timeoutMs: 180_000 });
+  // RP retrieve의 세분화 신호(no_request / pending+lastRequest)로 안내를 분기 — 무음 pending 조기 감지.
+  const cred = await client.waitForDelegation({
+    timeoutMs: 180_000,
+    onStatus: (r) => {
+      if (r.status === "no_request") {
+        console.error(
+          `  아직 이 에이전트(지문 ${key.fingerprint}) 대상 위임 요청이 없습니다 — ` +
+            "Briefick /publish에서 지문을 대조해 위임을 발급하세요",
+        );
+      } else if (r.status === "pending" && r.lastRequest) {
+        console.error(
+          `  위임 요청 확인(nonce ${r.lastRequest.nonce ?? "?"}, 만료 ${r.lastRequest.expiresAt ?? "?"}) — 지갑 승인·전달 대기…`,
+        );
+      }
+    },
+  });
   store.credentials = { ...(store.credentials ?? {}), [url]: cred };
   saveStore(keyFile, store);
   return cred;
@@ -105,6 +121,8 @@ export async function main(argv: string[]): Promise<number> {
   if (args.cmd === "did") {
     const { key, created } = await keyFrom(args.keyFile);
     console.log(key.did);
+    // 모든 did:jwk는 앞자리가 같아 육안 구분 불가 — /publish가 표시하는 지문과 1:1 대조용.
+    console.error(`지문: ${key.fingerprint} (Briefick /publish의 에이전트 지문과 대조)`);
     if (created) console.error(`(신규 키 생성·저장: ${args.keyFile})`);
     return 0;
   }
@@ -113,7 +131,9 @@ export async function main(argv: string[]): Promise<number> {
     if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
     const { key, store, created } = await keyFrom(args.keyFile);
     if (store.registrations?.[args.url] && !args.force) {
-      console.log(`이미 등록됨 — 재사용합니다 (재등록 불필요).\n  DID: ${key.did}\n  키: ${args.keyFile}`);
+      console.log(
+        `이미 등록됨 — 재사용합니다 (재등록 불필요).\n  DID: ${key.did}\n  지문: ${key.fingerprint}\n  키: ${args.keyFile}`,
+      );
       return 0;
     }
     if (!args.code) return fail("--code (또는 PAIRING_CODE) 필요 — Briefick /publish 페어링 코드");
@@ -122,7 +142,7 @@ export async function main(argv: string[]): Promise<number> {
     store.registrations = { ...(store.registrations ?? {}), [args.url]: true };
     saveStore(args.keyFile, store);
     console.log(
-      `✅ 등록 완료.\n  DID: ${key.did}\n  키 저장: ${args.keyFile} — 이후 재실행 시 재사용(재등록 불필요)${
+      `✅ 등록 완료.\n  DID: ${key.did}\n  지문: ${key.fingerprint} (/publish 표시와 대조)\n  키 저장: ${args.keyFile} — 이후 재실행 시 재사용(재등록 불필요)${
         created ? "" : "\n  (기존 키 재사용)"
       }`,
     );
@@ -133,7 +153,7 @@ export async function main(argv: string[]): Promise<number> {
     if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
     const { key, store } = await keyFrom(args.keyFile);
     const client = new BriefickAgentClient({ baseUrl: args.url, key });
-    const cred = await ensureCredential(client, store, args.url, args.keyFile);
+    const cred = await ensureCredential(client, store, args.url, args.keyFile, key);
     const r = await client.exchange(cred);
     if (r.status !== "issued" || !r.bearer) return fail(`세션 발급 실패: ${r.status}`);
     console.log(r.bearer); // stdout=bearer (파이프 가능), 안내는 stderr
@@ -145,7 +165,7 @@ export async function main(argv: string[]): Promise<number> {
     if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
     const { key, store } = await keyFrom(args.keyFile);
     const client = new BriefickAgentClient({ baseUrl: args.url, key });
-    const credential = await ensureCredential(client, store, args.url, args.keyFile);
+    const credential = await ensureCredential(client, store, args.url, args.keyFile, key);
     const auth = new AgentAuth({
       client,
       credential,
@@ -160,6 +180,7 @@ export async function main(argv: string[]): Promise<number> {
 
     console.error(`✅ 로컬 MCP 프록시 실행: ${proxy.url}  →  ${targetMcpUrl}`);
     console.error(`   에이전트 DID: ${key.did}`);
+    console.error(`   지문: ${key.fingerprint} (/publish 표시와 대조)`);
     console.error(`\nClaude Code 등록(다른 터미널에서):`);
     console.error(`   claude mcp add --transport http briefick ${proxy.url}\n`);
     console.error("(Ctrl+C 로 종료)");

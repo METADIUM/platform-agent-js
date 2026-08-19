@@ -6,8 +6,17 @@
  */
 import { SignJWT, importJWK, type JWK, type KeyLike } from "jose";
 import { generateKeyPair, exportJWK } from "jose";
+import { createHash } from "node:crypto";
 
 const ALG = "ES256";
+
+/**
+ * 에이전트 지문 — sha256(did:jwk 문자열) hex 앞 10자리. Briefick /publish가 등록 에이전트를
+ * 같은 지문으로 표시하므로 화면과 1:1 대조용(모든 did:jwk는 앞자리가 같아 육안 구분 불가).
+ */
+export function didFingerprint(did: string): string {
+  return createHash("sha256").update(did, "utf8").digest("hex").slice(0, 10);
+}
 
 /** 공개 JWK → did:jwk. JSON 키순서(crv,kty,x,y) 고정으로 platform-java와 바이트 동일. */
 export function didJwkFromPublicJwk(pub: JWK): string {
@@ -56,6 +65,11 @@ export class AgentKey {
   /** 저장용 개인 JWK(파일 등에 보관). */
   exportPrivateJwk(): JWK {
     return this.privateJwk;
+  }
+
+  /** 지문(sha256(did) 앞 10 hex) — Briefick /publish 표시와 동일, 화면 대조용. */
+  get fingerprint(): string {
+    return didFingerprint(this.did);
   }
 
   /**
