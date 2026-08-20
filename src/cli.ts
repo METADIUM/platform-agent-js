@@ -10,7 +10,7 @@
  */
 import { pathToFileURL } from "node:url";
 import { AgentKey } from "./key.js";
-import { AgentClientError, BriefickAgentClient } from "./briefick.js";
+import { AgentClientError, BriefickAgentClient, isRequestExpired } from "./briefick.js";
 import { AgentAuth } from "./agent.js";
 import { startProxy } from "./proxy.js";
 import { defaultKeyFile, loadStore, openStore, type AgentStore, type KeyStore } from "./keystore.js";
@@ -82,6 +82,12 @@ const REGISTER_GUIDE =
   "서버에서 등록이 회수됐거나 등록되지 않은 에이전트입니다 — " +
   "Briefick /publish에서 새 페어링 코드를 발급받아 `register --url <URL> --code <CODE> --force`를 실행하세요";
 
+/** 401 안내 — RP가 사유(미등록/회수됨)를 내려주면 함께 표기. */
+function registerGuide(e: AgentClientError): string {
+  const detail = e.body && typeof e.body === "object" ? (e.body as { error?: unknown }).error : undefined;
+  return typeof detail === "string" && detail ? `${REGISTER_GUIDE} (서버 사유: ${detail})` : REGISTER_GUIDE;
+}
+
 /** 지갑 승인·전달을 기다려 위임 VC를 회수하고 캐시에 저장한다(캐시 무시 — 항상 새로 회수). */
 async function waitCredential(
   client: BriefickAgentClient,
@@ -100,6 +106,11 @@ async function waitCredential(
           `  아직 이 에이전트(지문 ${key.fingerprint}) 대상 위임 요청이 없습니다 — ` +
             "Briefick /publish에서 지문을 대조해 위임을 발급하세요",
         );
+      } else if (isRequestExpired(r)) {
+        // 만료된 요청을 "승인 대기"로 오표시하지 않는다 — RP status:"expired" 또는 expiresAt로 판정.
+        console.error(
+          `  위임 요청이 만료됐습니다(nonce ${r.lastRequest?.nonce ?? "?"}) — Briefick /publish에서 위임을 다시 발급하세요`,
+        );
       } else if (r.status === "pending" && r.lastRequest) {
         console.error(
           `  위임 요청 확인(nonce ${r.lastRequest.nonce ?? "?"}, 만료 ${r.lastRequest.expiresAt ?? "?"}) — 지갑 승인·전달 대기…`,
@@ -109,7 +120,7 @@ async function waitCredential(
   }).catch((e) => {
     // 미등록/등록 회수 — 원인 모를 에러 대신 복구 절차 안내.
     if (e instanceof AgentClientError && (e.httpStatus === 401 || e.message.includes("등록되지 않은"))) {
-      throw new AgentClientError(REGISTER_GUIDE, e.httpStatus, e.body);
+      throw new AgentClientError(registerGuide(e), e.httpStatus, e.body);
     }
     throw e;
   });
@@ -155,7 +166,7 @@ async function recoverSessionFailure(
 ): Promise<string | null> {
   if (!(e instanceof AgentClientError)) return null;
   if (e.httpStatus === 401) {
-    throw new AgentClientError(REGISTER_GUIDE, e.httpStatus, e.body);
+    throw new AgentClientError(registerGuide(e), e.httpStatus, e.body);
   }
   if (e.message.includes("세션 거부")) {
     console.error(`위임이 무효화됐습니다(${e.message}) — 캐시를 비우고 지갑 재발급 승인 대기로 전환합니다`);

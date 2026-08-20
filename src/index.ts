@@ -19,6 +19,7 @@ export {
   BriefickAgentError,
   DEFAULT_SERVICE,
   POP_AUDIENCE,
+  isRequestExpired,
   type AgentClientOptions,
   type AgentServiceConfig,
   type BriefickClientOptions,

@@ -31,6 +31,11 @@ npx @metadium-did/platform-agent-js credentials clear --url <BRIEFICK_URL>  # �
 ③ 세션이 위임 무효 사유로 거부되면 **캐시를 자동 폐기하고 지갑 재발급 승인 대기로 전환** 후 1회 재시도
 ④ 세션 pending 타임아웃 시 `credentials clear` 안내.
 
+**만료 요청 구분(0.2.5)** — 재발급 대기 중 요청이 만료되면(RP `status:"expired"` 또는
+`lastRequest.expiresAt` 경과, 하위호환) "승인 대기" 대신 **"요청이 만료됐습니다 — /publish에서 위임을
+다시 발급하세요"** 를 표시한다(대기 중 만료로 전환되는 순간도 감지). 401 안내에는 RP가 내려주는
+서버 사유(`error`)를 함께 표기한다.
+
 `--url`/`--code`는 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
 
 `did`/`register`/`proxy`는 에이전트 **지문**(sha256(did:jwk) hex 앞 10자리)을 함께 출력한다 — 모든

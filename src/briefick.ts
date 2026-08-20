@@ -64,10 +64,11 @@ export interface DelegationLastRequest {
 export interface DelegationRetrieval {
   /**
    * delivered=회수 가능 / pending=요청 있음·지갑 승인/전달 대기 / no_request=이 에이전트로
-   * 발급된 위임 없음(엉뚱한 에이전트이거나 미발급) / no_agent=미등록. (구 RP는 no_request 없이
-   * pending만 반환 — 하위호환)
+   * 발급된 위임 없음(엉뚱한 에이전트이거나 미발급) / expired=마지막 요청 만료(재발급 필요) /
+   * no_agent=미등록. (구 RP는 no_request·expired 없이 pending만 반환 — 하위호환:
+   * expired는 lastRequest.expiresAt로도 판정한다, {@link isRequestExpired})
    */
-  status: "delivered" | "pending" | "no_request" | "no_agent" | string;
+  status: "delivered" | "pending" | "no_request" | "expired" | "no_agent" | string;
   credential?: string;
   scope?: unknown;
   constraints?: unknown;
@@ -165,12 +166,16 @@ export class AgentClient {
     const pollMs = opts.pollMs ?? 2000;
     const deadline = Date.now() + (opts.timeoutMs ?? 120000);
     let last: DelegationRetrieval | undefined;
+    let lastExpired = false;
     for (;;) {
       const r = await this.retrieveDelegation();
-      if (r.status !== last?.status || r.lastRequest?.nonce !== last?.lastRequest?.nonce) {
+      const expired = isRequestExpired(r);
+      // 대기 중 같은 요청이 만료로 넘어가는 순간(status·nonce 불변)에도 onStatus를 다시 알린다.
+      if (r.status !== last?.status || r.lastRequest?.nonce !== last?.lastRequest?.nonce || expired !== lastExpired) {
         opts.onStatus?.(r);
       }
       last = r;
+      lastExpired = expired;
       if (r.status === "delivered" && r.credential) return r.credential;
       if (r.status === "no_agent") throw new AgentClientError("등록되지 않은 에이전트");
       if (Date.now() > deadline) throw new AgentClientError(retrievalTimeoutMessage(last));
@@ -225,16 +230,25 @@ export { AgentClient as BriefickAgentClient };
 export { AgentClientError as BriefickAgentError };
 export type { AgentClientOptions as BriefickClientOptions };
 
+/** 요청 만료 여부 — RP의 명시적 {@code status:"expired"} 우선, 없으면 lastRequest.expiresAt로 판정(하위호환). */
+export function isRequestExpired(r: DelegationRetrieval): boolean {
+  if (r.status === "expired") return true;
+  const e = r.lastRequest?.expiresAt;
+  return e !== undefined && Date.parse(e) < Date.now();
+}
+
 /** 마지막 관측 상태로 타임아웃 원인을 구분한다(무음 pending의 조기 진단 — A 항목). */
 function retrievalTimeoutMessage(last?: DelegationRetrieval): string {
   if (last?.status === "no_request") {
     return "위임 VC 회수 타임아웃 — 이 에이전트로 발급된 위임 요청이 없습니다(다른 에이전트로 발급했거나 미발급). Briefick /publish에서 에이전트 지문을 대조해 위임을 발급하세요";
   }
+  if (last && isRequestExpired(last)) {
+    return `위임 VC 회수 타임아웃 — 마지막 요청(nonce ${last.lastRequest?.nonce ?? "?"})이 만료됐습니다. Briefick /publish에서 위임을 다시 발급하세요`;
+  }
   if (last?.status === "pending" && last.lastRequest) {
     const lr = last.lastRequest;
-    const expired = lr.expiresAt !== undefined && Date.parse(lr.expiresAt) < Date.now();
     return (
-      `위임 VC 회수 타임아웃 — 요청(nonce ${lr.nonce ?? "?"}, ${expired ? "만료됨" : `만료 ${lr.expiresAt ?? "?"}`})은 있으나 ` +
+      `위임 VC 회수 타임아웃 — 요청(nonce ${lr.nonce ?? "?"}, 만료 ${lr.expiresAt ?? "?"})은 있으나 ` +
       "지갑 발급물이 도착하지 않았습니다(지갑 callback 전달 실패 또는 미승인). 지갑에서 재승인하거나 /publish에서 재발급하세요"
     );
   }

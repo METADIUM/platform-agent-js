@@ -114,6 +114,18 @@ describe("cli — 서버-로컬 상태 불일치 복구", () => {
     expect(presented[1].startsWith("VC2~")).toBe(true);
   });
 
+  it("proxy: start 401 + 서버 사유 → 재등록 안내에 사유 포함", async () => {
+    const s = await stub({
+      "/api/agent/session/start": () => ({ status: 401, json: { error: "agent registration revoked" } }),
+    });
+    cleanup.push(s.close);
+    const file = tmpKeyFile();
+    await seededStore(file, (u) => ({ credentials: { [u]: "VC1~" } }), s.url);
+    await expect(main(["proxy", "--url", s.url, "--key-file", file])).rejects.toThrow(
+      /새 페어링 코드[\s\S]*agent registration revoked/,
+    );
+  });
+
   it("credentials clear --url: 해당 RP 캐시만 삭제", async () => {
     const file = tmpKeyFile();
     const key = await AgentKey.generate();

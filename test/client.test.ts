@@ -116,9 +116,9 @@ describe("waitForDelegation — retrieve 세분화 신호(0.2.2)", () => {
     await expect(c.waitForDelegation({ pollMs: 10, timeoutMs: 30 })).rejects.toThrow(/발급된 위임 요청이 없습니다/);
   });
 
-  it("타임아웃 메시지 — pending+lastRequest는 지갑 전달 실패 의심 안내(nonce 포함)", async () => {
+  it("타임아웃 메시지 — pending+lastRequest(미만료)는 지갑 전달 실패 의심 안내(nonce 포함)", async () => {
     const s = await seqStub([
-      { status: "pending", lastRequest: { nonce: "n-9", status: "pending", expiresAt: "2026-01-01T00:00:00Z" } },
+      { status: "pending", lastRequest: { nonce: "n-9", status: "pending", expiresAt: "2099-01-01T00:00:00Z" } },
     ]);
     stubs.push(s);
     const key = await AgentKey.generate();
@@ -126,6 +126,31 @@ describe("waitForDelegation — retrieve 세분화 신호(0.2.2)", () => {
     await expect(c.waitForDelegation({ pollMs: 10, timeoutMs: 30 })).rejects.toThrow(
       /n-9[\s\S]*전달 실패|전달 실패[\s\S]*n-9/,
     );
+  });
+
+  it("대기 중 같은 요청이 만료로 전환되면(status·nonce 불변) onStatus 재통지 + 만료 타임아웃 문구", async () => {
+    const lr = (expiresAt: string) => ({ nonce: "n-1", status: "pending", expiresAt });
+    const s = await seqStub([
+      { status: "pending", lastRequest: lr("2099-01-01T00:00:00Z") },
+      { status: "pending", lastRequest: lr("2020-01-01T00:00:00Z") }, // 만료로 전환
+    ]);
+    stubs.push(s);
+    const key = await AgentKey.generate();
+    const c = new AgentClient({ baseUrl: s.url, key });
+    const seen: boolean[] = [];
+    const { isRequestExpired } = await import("../src/briefick.js");
+    await expect(
+      c.waitForDelegation({ pollMs: 10, timeoutMs: 60, onStatus: (r) => seen.push(isRequestExpired(r)) }),
+    ).rejects.toThrow(/만료됐습니다[\s\S]*다시 발급/);
+    expect(seen).toEqual([false, true]); // 만료 전환 순간 재통지
+  });
+
+  it("RP 명시적 status:\"expired\" — 재발급 안내 타임아웃(신규 신호 우선)", async () => {
+    const s = await seqStub([{ status: "expired", lastRequest: { nonce: "n-2" } }]);
+    stubs.push(s);
+    const key = await AgentKey.generate();
+    const c = new AgentClient({ baseUrl: s.url, key });
+    await expect(c.waitForDelegation({ pollMs: 10, timeoutMs: 30 })).rejects.toThrow(/n-2[\s\S]*다시 발급/);
   });
 
   it("구 RP(pending만, lastRequest 없음) — 기존 타임아웃 문구 유지(하위호환)", async () => {
