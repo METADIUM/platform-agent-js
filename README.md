@@ -22,7 +22,14 @@ npx @metadium-did/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRIN
 
 npx @metadium-did/platform-agent-js did                        # 이 에이전트 did:jwk 출력
 npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세션 bearer 1회 발급(stdout)
+npx @metadium-did/platform-agent-js credentials clear --url <BRIEFICK_URL>  # 캐시된 위임 VC 삭제(철회 후 재발급 대기 전환)
 ```
+
+**서버-로컬 상태 불일치 복구(0.2.4)** — RP가 등록을 회수했거나 사용자가 위임을 철회한 뒤에도 CLI가
+원인 있는 안내로 복구를 돕는다: ① `register`는 `--code`가 주어지면 로컬 "이미 등록됨" 기록과 무관하게
+서버에 등록(회수 후 재등록) ② 세션 401은 "새 페어링 코드로 `register --force`" 안내로 실패
+③ 세션이 위임 무효 사유로 거부되면 **캐시를 자동 폐기하고 지갑 재발급 승인 대기로 전환** 후 1회 재시도
+④ 세션 pending 타임아웃 시 `credentials clear` 안내.
 
 `--url`/`--code`는 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
 
