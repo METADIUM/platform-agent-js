@@ -29,4 +29,17 @@ export {
 } from "./briefick.js";
 export { AgentAuth, type AgentAuthOptions } from "./agent.js";
 export { startProxy, type ProxyOptions, type RunningProxy, type BearerSource } from "./proxy.js";
-export { defaultKeyFile, loadStore, saveStore, type KeyStore } from "./keystore.js";
+export {
+  defaultKeyFile,
+  loadStore,
+  saveStore,
+  openStore,
+  loadKeychainStore,
+  saveKeychainStore,
+  type KeyStore,
+  type AgentStore,
+  type StoreBackendName,
+  type OpenStoreOptions,
+  type KeychainOptions,
+  type ExecFn,
+} from "./keystore.js";

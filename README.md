@@ -32,10 +32,22 @@ did:jwk는 앞자리가 같아 육안 구분이 안 되므로, Briefick `/publis
 `no_request`(이 에이전트로 발급된 위임 없음 — /publish에서 지문 확인) / `pending`+`lastRequest`(요청
 있음 — 지갑 승인·전달 대기, 타임아웃 시 지갑 callback 전달 실패 의심 안내).
 
-**키 영속(최초 1회만 등록, 이후 재사용)** — 키는 `~/.metapass-agent/key.json`(권한 0600)에 저장된다.
-재실행 시 같은 did:jwk를 재사용하므로 **매번 새 에이전트로 등록되지 않는다.** `register`는 이미 등록된 URL이면
-**자동으로 재등록을 건너뛴다**(다시 하려면 `--force`). 경로 변경: `--key-file <PATH>` 또는 `METAPASS_AGENT_KEY_FILE`.
-개인키는 이 파일에만 있고 네트워크로 나가지 않는다.
+**키 영속(최초 1회만 등록, 이후 재사용)** — 키는 `~/.metapass-agent/key.json`(파일 0600, 디렉터리 0700)에
+저장된다. 재실행 시 같은 did:jwk를 재사용하므로 **매번 새 에이전트로 등록되지 않는다.** `register`는 이미 등록된
+URL이면 **자동으로 재등록을 건너뛴다**(다시 하려면 `--force`). 경로 변경: `--key-file <PATH>` 또는
+`METAPASS_AGENT_KEY_FILE`. 개인키는 이 저장소에만 있고 네트워크로 나가지 않는다.
+
+**키 저장 보안** — 로드 시 파일 권한을 검사해 소유자 외 접근 가능(0600 아님)이면 ssh처럼 **거부**한다
+(`chmod 600` 안내). 평문 파일을 원치 않으면 **OS 키체인 백엔드**를 쓴다:
+
+```bash
+npx @metadium-did/platform-agent-js did --key-backend keychain   # 또는 env METAPASS_AGENT_KEY_BACKEND=keychain
+```
+
+macOS는 Keychain(`security`), Linux는 libsecret(`secret-tool`)에 저장하며 평문 파일이 남지 않는다.
+기존 `key.json`이 있으면 최초 1회 자동으로 키체인에 이관한다(이관 후 파일 삭제 권장). 키가 유출돼도
+에이전트가 얻는 것은 위임된 scope 안의 짧은 TTL 세션뿐이고, 지갑에서 위임을 철회하면 즉시 무효다 —
+위임 발급 시 scope·기한을 최소로 잡는 것이 가장 효과적인 방어다.
 
 ## 로컬 프록시 모드 — Claude Code 연동 (방식 b)
 

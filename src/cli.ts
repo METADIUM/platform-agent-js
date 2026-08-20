@@ -12,13 +12,14 @@ import { AgentKey } from "./key.js";
 import { BriefickAgentClient } from "./briefick.js";
 import { AgentAuth } from "./agent.js";
 import { startProxy } from "./proxy.js";
-import { defaultKeyFile, loadStore, saveStore, type KeyStore } from "./keystore.js";
+import { defaultKeyFile, loadStore, openStore, type AgentStore, type KeyStore } from "./keystore.js";
 
 interface Args {
   cmd?: string;
   url?: string;
   code?: string;
   keyFile: string;
+  keyBackend?: string;
   force: boolean;
   port?: number;
   mcpPath?: string;
@@ -32,6 +33,7 @@ function parse(argv: string[]): Args {
     if (a === "--url") out.url = argv[++i];
     else if (a === "--code") out.code = argv[++i];
     else if (a === "--key-file") out.keyFile = argv[++i];
+    else if (a === "--key-backend") out.keyBackend = argv[++i];
     else if (a === "--port") out.port = Number(argv[++i]);
     else if (a === "--mcp-path") out.mcpPath = argv[++i];
     else if (a === "--force") out.force = true;
@@ -45,26 +47,42 @@ function parse(argv: string[]): Args {
   return out;
 }
 
-async function keyFrom(file: string): Promise<{ key: AgentKey; store: KeyStore; created: boolean }> {
-  const existing = loadStore(file);
+/** 저장소 오픈 — keychain 백엔드가 비어 있고 기존 key.json이 있으면 최초 1회 이관. */
+function openAgentStore(args: Args): AgentStore {
+  const store = openStore({ backend: args.keyBackend, keyFile: args.keyFile });
+  if (store.backend === "keychain" && !store.load()) {
+    const legacy = loadStore(args.keyFile);
+    if (legacy) {
+      store.save(legacy);
+      console.error(
+        `기존 키 파일을 키체인으로 가져왔습니다: ${args.keyFile} → ${store.location}\n` +
+          `  평문 파일 삭제 권장: rm "${args.keyFile}"`,
+      );
+    }
+  }
+  return store;
+}
+
+async function keyFrom(store: AgentStore): Promise<{ key: AgentKey; data: KeyStore; created: boolean }> {
+  const existing = store.load();
   if (existing?.privateJwk) {
-    return { key: await AgentKey.fromPrivateJwk(existing.privateJwk), store: existing, created: false };
+    return { key: await AgentKey.fromPrivateJwk(existing.privateJwk), data: existing, created: false };
   }
   const key = await AgentKey.generate();
-  const store: KeyStore = { privateJwk: key.exportPrivateJwk(), registrations: {} };
-  saveStore(file, store);
-  return { key, store, created: true };
+  const data: KeyStore = { privateJwk: key.exportPrivateJwk(), registrations: {} };
+  store.save(data);
+  return { key, data, created: true };
 }
 
 /** 위임 VC 확보 — 저장돼 있으면 재사용, 없으면 회수(지갑 승인 대기) 후 저장. */
 async function ensureCredential(
   client: BriefickAgentClient,
-  store: KeyStore,
+  data: KeyStore,
   url: string,
-  keyFile: string,
+  store: AgentStore,
   key: AgentKey,
 ): Promise<string> {
-  const stored = store.credentials?.[url];
+  const stored = data.credentials?.[url];
   if (stored) return stored;
   console.error("위임 VC 회수 대기(지갑에서 승인 필요)…");
   // RP retrieve의 세분화 신호(no_request / pending+lastRequest)로 안내를 분기 — 무음 pending 조기 감지.
@@ -83,8 +101,8 @@ async function ensureCredential(
       }
     },
   });
-  store.credentials = { ...(store.credentials ?? {}), [url]: cred };
-  saveStore(keyFile, store);
+  data.credentials = { ...(data.credentials ?? {}), [url]: cred };
+  store.save(data);
   return cred;
 }
 
@@ -108,6 +126,9 @@ const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 
   --port <N>         proxy 리슨 포트 (기본 8787, 127.0.0.1 전용)
   --mcp-path <PATH>  RP MCP 경로 (기본 /api/mcp)
   --key-file <PATH>  키 파일 경로 (기본 ~/.metapass-agent/key.json, env METAPASS_AGENT_KEY_FILE)
+  --key-backend <B>  키 저장 백엔드: file(기본) | keychain (env METAPASS_AGENT_KEY_BACKEND)
+                     keychain = macOS Keychain(security) / Linux libsecret(secret-tool) — 평문 파일 없음.
+                     기존 key.json이 있으면 최초 1회 자동 이관(이관 후 파일 삭제 권장)
   --force            이미 등록됐어도 재등록`;
 
 export async function main(argv: string[]): Promise<number> {
@@ -119,30 +140,32 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (args.cmd === "did") {
-    const { key, created } = await keyFrom(args.keyFile);
+    const store = openAgentStore(args);
+    const { key, created } = await keyFrom(store);
     console.log(key.did);
     // 모든 did:jwk는 앞자리가 같아 육안 구분 불가 — /publish가 표시하는 지문과 1:1 대조용.
     console.error(`지문: ${key.fingerprint} (Briefick /publish의 에이전트 지문과 대조)`);
-    if (created) console.error(`(신규 키 생성·저장: ${args.keyFile})`);
+    if (created) console.error(`(신규 키 생성·저장: ${store.location})`);
     return 0;
   }
 
   if (args.cmd === "register") {
     if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
-    const { key, store, created } = await keyFrom(args.keyFile);
-    if (store.registrations?.[args.url] && !args.force) {
+    const store = openAgentStore(args);
+    const { key, data, created } = await keyFrom(store);
+    if (data.registrations?.[args.url] && !args.force) {
       console.log(
-        `이미 등록됨 — 재사용합니다 (재등록 불필요).\n  DID: ${key.did}\n  지문: ${key.fingerprint}\n  키: ${args.keyFile}`,
+        `이미 등록됨 — 재사용합니다 (재등록 불필요).\n  DID: ${key.did}\n  지문: ${key.fingerprint}\n  키: ${store.location}`,
       );
       return 0;
     }
     if (!args.code) return fail("--code (또는 PAIRING_CODE) 필요 — Briefick /publish 페어링 코드");
     const client = new BriefickAgentClient({ baseUrl: args.url, key });
     await client.register(args.code);
-    store.registrations = { ...(store.registrations ?? {}), [args.url]: true };
-    saveStore(args.keyFile, store);
+    data.registrations = { ...(data.registrations ?? {}), [args.url]: true };
+    store.save(data);
     console.log(
-      `✅ 등록 완료.\n  DID: ${key.did}\n  지문: ${key.fingerprint} (/publish 표시와 대조)\n  키 저장: ${args.keyFile} — 이후 재실행 시 재사용(재등록 불필요)${
+      `✅ 등록 완료.\n  DID: ${key.did}\n  지문: ${key.fingerprint} (/publish 표시와 대조)\n  키 저장: ${store.location} — 이후 재실행 시 재사용(재등록 불필요)${
         created ? "" : "\n  (기존 키 재사용)"
       }`,
     );
@@ -151,9 +174,10 @@ export async function main(argv: string[]): Promise<number> {
 
   if (args.cmd === "session") {
     if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
-    const { key, store } = await keyFrom(args.keyFile);
+    const store = openAgentStore(args);
+    const { key, data } = await keyFrom(store);
     const client = new BriefickAgentClient({ baseUrl: args.url, key });
-    const cred = await ensureCredential(client, store, args.url, args.keyFile, key);
+    const cred = await ensureCredential(client, data, args.url, store, key);
     const r = await client.exchange(cred);
     if (r.status !== "issued" || !r.bearer) return fail(`세션 발급 실패: ${r.status}`);
     console.log(r.bearer); // stdout=bearer (파이프 가능), 안내는 stderr
@@ -163,9 +187,10 @@ export async function main(argv: string[]): Promise<number> {
 
   if (args.cmd === "proxy") {
     if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
-    const { key, store } = await keyFrom(args.keyFile);
+    const store = openAgentStore(args);
+    const { key, data } = await keyFrom(store);
     const client = new BriefickAgentClient({ baseUrl: args.url, key });
-    const credential = await ensureCredential(client, store, args.url, args.keyFile, key);
+    const credential = await ensureCredential(client, data, args.url, store, key);
     const auth = new AgentAuth({
       client,
       credential,

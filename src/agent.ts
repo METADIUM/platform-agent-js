@@ -12,8 +12,10 @@ export interface AgentAuthOptions {
   refreshSkewMs?: number;
   /** 갱신 때마다 새 bearer 통지 — MCP 고정헤더/토큰 캐시 갱신에 사용. */
   onRefresh?: (bearer: string, expiresAt: Date) => void;
-  /** 재교환 실패 시 통지(재시도는 만료까지 자동). */
+  /** 재교환 실패 시 통지(성공할 때까지 retryMs 간격으로 계속 재시도). */
   onError?: (err: unknown) => void;
+  /** 실패 재시도 간격 ms(기본 10s). */
+  retryMs?: number;
 }
 
 /**
@@ -74,13 +76,22 @@ export class AgentAuth {
     this.timer = setTimeout(() => {
       this.refresh().catch((e) => {
         this.opts.onError?.(e);
-        // 만료 전 재시도(짧게 재스케줄)
-        if (!this.stopped) {
-          this.timer = setTimeout(() => this.refresh().catch(() => {}), 10_000);
-        }
+        this.retrySoon();
       });
     }, delay);
     // Node에서 프로세스 종료를 막지 않도록
+    (this.timer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /** 갱신 실패 시 성공할 때까지 재시도 — 일시 네트워크 단절이 재시도 1회보다 길어도 루프가 죽지 않는다. */
+  private retrySoon(): void {
+    if (this.stopped) return;
+    this.timer = setTimeout(() => {
+      this.refresh().catch((e) => {
+        this.opts.onError?.(e);
+        this.retrySoon();
+      });
+    }, this.opts.retryMs ?? 10_000);
     (this.timer as unknown as { unref?: () => void }).unref?.();
   }
 }
