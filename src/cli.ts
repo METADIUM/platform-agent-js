@@ -8,6 +8,7 @@
  * 키는 `~/.metapass-agent/key.json`에 영속 → **최초 1회만 등록, 이후 재사용**. `--url`/`--code`는
  * 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
  */
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AgentKey } from "./key.js";
 import { AgentClientError, BriefickAgentClient, isRequestExpired } from "./briefick.js";
@@ -19,6 +20,7 @@ import {
   type DaemonConfig, type DaemonRp,
 } from "./config.js";
 import { startDaemon, type DaemonTarget } from "./daemon.js";
+import { install as installUnit, uninstall as uninstallUnit } from "./install.js";
 
 interface Args {
   cmd?: string;
@@ -33,10 +35,12 @@ interface Args {
   mcpPath?: string;
   alias?: string;
   insecureNoToken: boolean;
+  install: boolean;
+  uninstallFlag: boolean;
 }
 
 function parse(argv: string[]): Args {
-  const out: Args = { keyFile: "", force: false, insecureNoToken: false };
+  const out: Args = { keyFile: "", force: false, insecureNoToken: false, install: false, uninstallFlag: false };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -48,6 +52,8 @@ function parse(argv: string[]): Args {
     else if (a === "--mcp-path") out.mcpPath = argv[++i];
     else if (a === "--alias") out.alias = argv[++i];
     else if (a === "--insecure-no-token") out.insecureNoToken = true;
+    else if (a === "--install") out.install = true;
+    else if (a === "--uninstall") out.uninstallFlag = true;
     else if (a === "--force") out.force = true;
     else if (a === "-h" || a === "--help") out.cmd = "help";
     else rest.push(a);
@@ -194,12 +200,24 @@ async function recoverSessionFailure(
 /** 위임 VC(SD-JWT)의 만료 — `validUntil`(ISO) 우선, 없으면 `exp`(epoch 초). 파싱 실패 시 null. */
 function delegationValidUntil(sdJwt: string): Date | null {
   try {
-    const payloadB64 = sdJwt.split("~")[0].split(".")[1];
-    const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as {
+    const parts = sdJwt.split("~");
+    const payload = JSON.parse(Buffer.from(parts[0].split(".")[1], "base64url").toString("utf8")) as {
       validUntil?: string;
       exp?: number;
     };
     if (payload.validUntil) return new Date(payload.validUntil);
+    // validUntil이 선택공개(_sd)면 페이로드엔 다이제스트뿐 — disclosure([salt, 이름, 값])에서 찾는다
+    for (const d of parts.slice(1)) {
+      if (!d) continue;
+      try {
+        const disc = JSON.parse(Buffer.from(d, "base64url").toString("utf8")) as unknown[];
+        if (Array.isArray(disc) && disc[1] === "validUntil" && typeof disc[2] === "string") {
+          return new Date(disc[2]);
+        }
+      } catch {
+        // KB-JWT 등 비disclosure 조각 — 무시
+      }
+    }
     if (typeof payload.exp === "number") return new Date(payload.exp * 1000);
     return null;
   } catch {
@@ -271,6 +289,9 @@ const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 
   npx @metadium-did/platform-agent-js status            # RP별 위임 유효·만료·데몬 상태
   npx @metadium-did/platform-agent-js remove <alias>
   npx @metadium-did/platform-agent-js rotate-token      # ⚠ 회전 = 전 RP MCP 재등록 필요
+  npx @metadium-did/platform-agent-js up --install      # OS 데몬 설치+시작(launchd/systemd --user+linger)
+  npx @metadium-did/platform-agent-js down --uninstall  # OS 데몬 중지·제거
+  npx @metadium-did/platform-agent-js upgrade           # 유닛 재설치(실행 라인 갱신)·재시작
 
 사용(단일 RP·저수준):
   npx @metadium-did/platform-agent-js register --url <RP_URL> --code <PAIRING_CODE>
@@ -488,6 +509,33 @@ export async function main(argv: string[]): Promise<number> {
       console.log(`  ${rp.alias.padEnd(10)} ${deleg}`);
       console.log(`  ${"".padEnd(10)} ${mcpAddCommand(rp.alias, port, token, cfg.rps.length === 1)}`);
     }
+    return 0;
+  }
+
+  if (args.cmd === "down") {
+    if (!args.uninstallFlag) return fail("사용: down --uninstall — OS 데몬 유닛 중지·제거");
+    for (const line of uninstallUnit()) console.log("✅ " + line);
+    return 0;
+  }
+
+  if (args.cmd === "upgrade") {
+    // 실행 라인(버전·경로)이 바뀌었을 수 있으므로 유닛 재설치 = 최신 실행 라인으로 재기동
+    const dir0 = configDir(args.keyFile);
+    const r = installUnit(join(dir0, "daemon.log"));
+    console.log(`✅ 유닛 재설치·재시작(${r.kind}): ${r.unitPath}`);
+    for (const n of r.notes) console.log("  " + n);
+    return 0;
+  }
+
+  if (args.cmd === "up" && args.install) {
+    const dir = configDir(args.keyFile);
+    const cfg = loadConfig(dir);
+    if (cfg.rps.length === 0) return fail("등록된 RP 없음 — 먼저 add <RP_URL> --code <CODE>");
+    ensureToken(dir); // 유닛 기동 전에 토큰·권한 선검증(fail-closed를 설치 시점에 노출)
+    const r = installUnit(join(dir, "daemon.log"));
+    console.log(`✅ OS 데몬 설치·시작(${r.kind}): ${r.unitPath}`);
+    for (const n of r.notes) console.log("  " + n);
+    console.log("  상태: npx @metadium-did/platform-agent-js status");
     return 0;
   }
 

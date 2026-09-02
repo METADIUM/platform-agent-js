@@ -1,6 +1,6 @@
 {
   "name": "@metadium-did/platform-agent-js",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "METADIUM AI-agent holder client + CLI — did:jwk key, PoP JWT, SD-JWT VC presentation (KB-JWT), and the Briefick agent-auth delegation flow. Node/TS (ES256/P-256 only), wire-compatible with platform-java.",
   "type": "module",
   "main": "dist/index.js",
@@ -15,7 +15,11 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "bin", "README.md"],
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -27,12 +31,16 @@
     "demo": "tsx scripts/demo.ts",
     "cli": "tsx src/cli.ts"
   },
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "jose": "^5.9.6"
   },
   "devDependencies": {
     "@types/node": "^22.7.0",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

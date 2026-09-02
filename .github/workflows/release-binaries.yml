@@ -1,0 +1,37 @@
+# SEA 단일 바이너리 릴리스(doc26 §2-6) — GitHub Release publish 시 4타깃 빌드·서명·자산 업로드.
+# 게이트: SHA256SUMS를 minisign으로 서명(secret MINISIGN_SECRET_KEY 필요 — 없으면 실패 = fail-closed).
+name: Release binaries
+on:
+  release:
+    types: [published]
+permissions:
+  contents: write
+jobs:
+  binaries:
+    runs-on: macos-14   # darwin 코드사인(ad-hoc) 때문에 macOS 러너에서 4타깃 교차 생성
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/build-sea.mjs --all
+      - name: Sign SHA256SUMS (minisign — 릴리스 게이트)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          test -n "$MINISIGN_SECRET_KEY" || { echo "MINISIGN_SECRET_KEY secret 미설정 — 서명 없는 릴리스는 금지(fail-closed)"; exit 1; }
+          brew install minisign
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          printf '%s\n' "$MINISIGN_PASSWORD" | minisign -Sm dist-bin/SHA256SUMS -s /tmp/minisign.key
+          rm -f /tmp/minisign.key
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            dist-bin/metapass-agent-darwin-arm64 dist-bin/metapass-agent-darwin-x64 \
+            dist-bin/metapass-agent-linux-x64 dist-bin/metapass-agent-linux-arm64 \
+            dist-bin/SHA256SUMS dist-bin/SHA256SUMS.minisig scripts/install.sh --clobber
