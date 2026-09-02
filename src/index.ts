@@ -44,3 +44,16 @@ export {
   type KeychainOptions,
   type ExecFn,
 } from "./keystore.js";
+export {
+  aliasFromUrl,
+  configDir,
+  ensureToken,
+  loadConfig,
+  mcpAddCommand,
+  rotateToken,
+  saveConfig,
+  assertOwnerOnly,
+  type DaemonConfig,
+  type DaemonRp,
+} from "./config.js";
+export { startDaemon, type DaemonOptions, type DaemonTarget, type RunningDaemon } from "./daemon.js";

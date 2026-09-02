@@ -12,12 +12,17 @@ import { pathToFileURL } from "node:url";
 import { AgentKey } from "./key.js";
 import { AgentClientError, BriefickAgentClient, isRequestExpired } from "./briefick.js";
 import { AgentAuth } from "./agent.js";
-import { startProxy } from "./proxy.js";
+import { startProxy, type BearerSource } from "./proxy.js";
 import { defaultKeyFile, loadStore, openStore, type AgentStore, type KeyStore } from "./keystore.js";
+import {
+  aliasFromUrl, configDir, ensureToken, loadConfig, mcpAddCommand, rotateToken, saveConfig,
+  type DaemonConfig, type DaemonRp,
+} from "./config.js";
+import { startDaemon, type DaemonTarget } from "./daemon.js";
 
 interface Args {
   cmd?: string;
-  /** 서브커맨드 (예: credentials clear). */
+  /** 서브커맨드 (예: credentials clear / add·remove의 URL·alias). */
   sub?: string;
   url?: string;
   code?: string;
@@ -26,10 +31,12 @@ interface Args {
   force: boolean;
   port?: number;
   mcpPath?: string;
+  alias?: string;
+  insecureNoToken: boolean;
 }
 
 function parse(argv: string[]): Args {
-  const out: Args = { keyFile: "", force: false };
+  const out: Args = { keyFile: "", force: false, insecureNoToken: false };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -39,6 +46,8 @@ function parse(argv: string[]): Args {
     else if (a === "--key-backend") out.keyBackend = argv[++i];
     else if (a === "--port") out.port = Number(argv[++i]);
     else if (a === "--mcp-path") out.mcpPath = argv[++i];
+    else if (a === "--alias") out.alias = argv[++i];
+    else if (a === "--insecure-no-token") out.insecureNoToken = true;
     else if (a === "--force") out.force = true;
     else if (a === "-h" || a === "--help") out.cmd = "help";
     else rest.push(a);
@@ -182,18 +191,103 @@ async function recoverSessionFailure(
   return null;
 }
 
+/** 위임 VC(SD-JWT)의 만료 — `validUntil`(ISO) 우선, 없으면 `exp`(epoch 초). 파싱 실패 시 null. */
+function delegationValidUntil(sdJwt: string): Date | null {
+  try {
+    const payloadB64 = sdJwt.split("~")[0].split(".")[1];
+    const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as {
+      validUntil?: string;
+      exp?: number;
+    };
+    if (payload.validUntil) return new Date(payload.validUntil);
+    if (typeof payload.exp === "number") return new Date(payload.exp * 1000);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function formatLeft(ms: number): string {
+  const h = Math.floor(ms / 3600_000);
+  if (h >= 48) return `${Math.floor(h / 24)}d`;
+  if (h >= 1) return `${h}h`;
+  return `${Math.max(1, Math.floor(ms / 60_000))}m`;
+}
+
+/**
+ * 데몬 타깃 연결(백그라운드) — 저장된 위임이 있으면 즉시 bearer 갱신 루프를 시작하고,
+ * 없거나 무효화됐으면 지갑 승인(회수)을 기다렸다가 자동 연결한다. 실패해도 데몬은 계속
+ * 뜬 채 해당 경로만 503(delegation_pending) — 다른 RP에 영향 없음.
+ */
+async function connectTarget(
+  target: DaemonTarget,
+  client: BriefickAgentClient,
+  data: KeyStore,
+  rp: DaemonRp,
+  store: AgentStore,
+  key: AgentKey,
+): Promise<void> {
+  for (;;) {
+    try {
+      let credential = data.credentials?.[rp.url];
+      if (!credential) {
+        console.error(`[${rp.alias}] 위임 미보유 — 지갑 승인 대기(지문 ${key.fingerprint})`);
+        credential = await waitCredential(client, data, rp.url, store, key);
+      }
+      const auth = new AgentAuth({
+        client,
+        credential,
+        onRefresh: (_b, exp) => console.error(`[${rp.alias}] 세션 bearer 갱신 (만료 ${exp.toISOString()})`),
+        onError: (e) => console.error(`[${rp.alias}] 세션 갱신 실패(재시도됨): ${e}`),
+      });
+      try {
+        await auth.start();
+      } catch (e) {
+        const fresh = await recoverSessionFailure(e, client, data, rp.url, store, key);
+        if (!fresh) throw e;
+        auth.stop();
+        continue; // 재발급 위임으로 처음부터
+      }
+      target.auth = auth;
+      const until = delegationValidUntil(credential);
+      console.error(
+        `[${rp.alias}] 연결됨 → ${target.targetMcpUrl}` +
+          (until ? ` (위임 만료 ${until.toISOString()})` : ""),
+      );
+      return;
+    } catch (e) {
+      target.pendingReason = `연결 실패 — 60초 후 재시도: ${e instanceof Error ? e.message : String(e)}`;
+      console.error(`[${rp.alias}] ${target.pendingReason}`);
+      await new Promise((r) => setTimeout(r, 60_000));
+    }
+  }
+}
+
 const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 CLI
 
-사용:
-  npx @metadium-did/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
-  npx @metadium-did/platform-agent-js proxy    --url <BRIEFICK_URL> [--port 8787]
+사용(데몬 — 권장, doc26):
+  npx @metadium-did/platform-agent-js add <RP_URL> --code <PAIRING_CODE> [--alias 이름]
+  npx @metadium-did/platform-agent-js up                # 등록된 전 RP를 한 데몬으로(로컬 토큰 필수)
+  npx @metadium-did/platform-agent-js status            # RP별 위임 유효·만료·데몬 상태
+  npx @metadium-did/platform-agent-js remove <alias>
+  npx @metadium-did/platform-agent-js rotate-token      # ⚠ 회전 = 전 RP MCP 재등록 필요
+
+사용(단일 RP·저수준):
+  npx @metadium-did/platform-agent-js register --url <RP_URL> --code <PAIRING_CODE>
+  npx @metadium-did/platform-agent-js proxy    --url <RP_URL> [--port 8787]
   npx @metadium-did/platform-agent-js did
-  npx @metadium-did/platform-agent-js session  --url <BRIEFICK_URL>
-  npx @metadium-did/platform-agent-js credentials clear [--url <BRIEFICK_URL>]
+  npx @metadium-did/platform-agent-js session  --url <RP_URL>
+  npx @metadium-did/platform-agent-js credentials clear [--url <RP_URL>]
 
 명령:
+  add                RP 추가 — 페어링(register)+데몬 설정을 한 번에. 끝나면 claude mcp add 명령(로컬 토큰 포함) 출력
+  up                 등록된 모든 RP를 한 프로세스로 서빙: 127.0.0.1:<port>/<alias>/mcp (RP 1개면 /mcp 호환).
+                     로컬 인증 토큰 필수(GET /healthz만 무토큰 — 다운 vs 인증실패 구분용)
+  status             데몬 생사 + RP별 위임 유효/만료 임박(<24h ⚠) + MCP 등록 명령
+  remove             데몬 설정에서 RP 제거
+  rotate-token       로컬 토큰 회전 — 즉시 전 RP의 MCP 등록이 401, 출력된 명령으로 전부 재등록
   register           페어링 코드로 에이전트 등록(최초 1회). --code가 있으면 로컬 기록과 무관하게 서버에 등록(회수 후 재등록)
-  proxy              로컬 MCP 프록시 실행(고정 헤더 → 최신 bearer 주입). Claude Code는 이 프록시를 MCP로 등록.
+  proxy              단일 RP 프록시(레거시) — 로컬 토큰 기본 적용, 무토큰은 --insecure-no-token 명시 시에만(경고)
   did                이 에이전트 did:jwk 출력
   session            위임 세션 bearer 1회 발급(stdout)
   credentials clear  캐시된 위임 VC 삭제(--url 지정 시 해당 RP만) — 위임 철회 후 재발급 대기로 전환
@@ -296,6 +390,150 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  // ── 데몬(doc26 P1): add / remove / up / status / rotate-token ─────────────
+
+  if (args.cmd === "add") {
+    const url = (args.sub ?? args.url)?.replace(/\/+$/, "");
+    if (!url) return fail("사용: add <RP_URL> [--code <CODE>] [--alias <이름>] [--mcp-path /api/mcp]");
+    const store = openAgentStore(args);
+    const { key, data } = await keyFrom(store);
+    const dir = configDir(args.keyFile);
+    const cfg = loadConfig(dir);
+    const alias = args.alias ?? aliasFromUrl(url);
+    if (cfg.rps.some((r) => r.alias === alias && r.url !== url)) {
+      return fail(`alias 충돌: '${alias}' — --alias 로 다른 이름을 지정하세요`);
+    }
+    // 페어링(register) 통합 — 이미 등록돼 있으면 code 불필요
+    if (!data.registrations?.[url]) {
+      if (!args.code) return fail("--code 필요(최초 페어링) — RP의 에이전트 등록 화면에서 발급");
+      const client = new BriefickAgentClient({ baseUrl: url, key });
+      await client.register(args.code);
+      data.registrations = { ...(data.registrations ?? {}), [url]: true };
+      store.save(data);
+    }
+    if (!cfg.rps.some((r) => r.alias === alias)) {
+      cfg.rps.push({ alias, url, ...(args.mcpPath ? { mcpPath: args.mcpPath } : {}) } satisfies DaemonRp);
+      saveConfig(dir, cfg);
+    }
+    const token = ensureToken(dir);
+    const port = cfg.port ?? 8787;
+    console.log(`✅ RP 추가: ${alias} → ${url}\n  지문: ${key.fingerprint}`);
+    console.log(`\nClaude Code 등록(복사-실행):`);
+    console.log(`  ${mcpAddCommand(alias, port, token, cfg.rps.length === 1)}`);
+    if (cfg.rps.length > 1) {
+      console.log(`\n⚠ RP가 ${cfg.rps.length}개 — 루트 /mcp 등록이 있었다면 경로형으로 재등록하세요(status가 전체 명령 출력)`);
+    }
+    console.log(`\n데몬 실행: npx @metadium-did/platform-agent-js up`);
+    return 0;
+  }
+
+  if (args.cmd === "remove") {
+    const alias = args.sub ?? args.alias;
+    if (!alias) return fail("사용: remove <alias>");
+    const dir = configDir(args.keyFile);
+    const cfg = loadConfig(dir);
+    const before = cfg.rps.length;
+    cfg.rps = cfg.rps.filter((r) => r.alias !== alias);
+    if (cfg.rps.length === before) return fail(`알 수 없는 alias: ${alias}`);
+    saveConfig(dir, cfg);
+    console.log(`✅ 제거: ${alias} — 데몬 재시작 후 반영 (등록·위임 캐시는 유지: credentials clear --url 로 별도 정리)`);
+    return 0;
+  }
+
+  if (args.cmd === "rotate-token") {
+    const dir = configDir(args.keyFile);
+    const token = rotateToken(dir);
+    const cfg = loadConfig(dir);
+    console.log("✅ 로컬 토큰 회전 완료");
+    console.log("⚠ 토큰은 데몬당 1개 — 지금 즉시 **모든 RP의 Claude Code 등록이 401**입니다. 아래로 전부 재등록하세요:");
+    for (const rp of cfg.rps) {
+      console.log(`  claude mcp remove ${rp.alias}; ${mcpAddCommand(rp.alias, cfg.port ?? 8787, token, cfg.rps.length === 1)}`);
+    }
+    return 0;
+  }
+
+  if (args.cmd === "status") {
+    const dir = configDir(args.keyFile);
+    const cfg = loadConfig(dir);
+    const store = openAgentStore(args);
+    const data = store.load();
+    const key = data?.privateJwk ? await AgentKey.fromPrivateJwk(data.privateJwk) : null;
+    const token = ensureToken(dir);
+    const port = cfg.port ?? 8787;
+    let daemon = "stopped (ConnectionRefused)";
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(1500) });
+      daemon = r.ok ? `running (port ${port})` : `unhealthy (${r.status})`;
+    } catch {
+      // stopped
+    }
+    console.log(`agent ${key ? key.fingerprint : "(키 없음)"}  ·  daemon: ${daemon}`);
+    if (cfg.rps.length === 0) {
+      console.log("  등록된 RP 없음 — add <RP_URL> --code <CODE> 로 시작하세요");
+      return 0;
+    }
+    for (const rp of cfg.rps) {
+      const cred = data?.credentials?.[rp.url];
+      let deleg = "위임 없음 → 지갑 승인 필요";
+      if (cred) {
+        const until = delegationValidUntil(cred);
+        if (!until) deleg = "위임 보유(만료 정보 없음)";
+        else {
+          const leftMs = until.getTime() - Date.now();
+          deleg = leftMs <= 0
+            ? `✗ 위임 만료(${until.toISOString()}) → 지갑 재승인 필요`
+            : (leftMs < 24 * 3600_000 ? "⚠ 위임 만료 임박 " : "✓ 위임 유효 ") + `(${formatLeft(leftMs)} 남음)`;
+        }
+      }
+      console.log(`  ${rp.alias.padEnd(10)} ${deleg}`);
+      console.log(`  ${"".padEnd(10)} ${mcpAddCommand(rp.alias, port, token, cfg.rps.length === 1)}`);
+    }
+    return 0;
+  }
+
+  if (args.cmd === "up") {
+    const dir = configDir(args.keyFile);
+    const cfg = loadConfig(dir);
+    if (cfg.rps.length === 0) return fail("등록된 RP 없음 — 먼저 add <RP_URL> --code <CODE>");
+    const store = openAgentStore(args);
+    const { key, data } = await keyFrom(store);
+    const token = ensureToken(dir);
+
+    const targets: DaemonTarget[] = [];
+    for (const rp of cfg.rps) {
+      const client = new BriefickAgentClient({ baseUrl: rp.url, key });
+      const target: DaemonTarget = {
+        alias: rp.alias,
+        targetMcpUrl: rp.url.replace(/\/+$/, "") + (rp.mcpPath ?? "/api/mcp"),
+        auth: null,
+        pendingReason: "위임 미확보 — 지갑에서 승인하면 자동 연결됩니다",
+      };
+      targets.push(target);
+      void connectTarget(target, client, data, rp, store, key);
+    }
+
+    const daemon = await startDaemon({ targets, token, port: cfg.port });
+    if (cfg.port !== daemon.port) {
+      cfg.port = daemon.port; // 최초 자동 배정 포트 고정(다중 계정 서버에서 사용자별로 갈림)
+      saveConfig(dir, cfg);
+    }
+    console.error(`✅ 에이전트 데몬 실행: 127.0.0.1:${daemon.port} (RP ${targets.length}개, 로컬 토큰 필수)`);
+    console.error(`   에이전트 지문: ${key.fingerprint}`);
+    console.error(`\nClaude Code 등록(복사-실행):`);
+    for (const rp of cfg.rps) {
+      console.error(`  ${mcpAddCommand(rp.alias, daemon.port, token, cfg.rps.length === 1)}`);
+    }
+    console.error("\n(Ctrl+C 로 종료 · 상태는 다른 터미널에서 `status`)");
+    const stop = async () => {
+      await daemon.close();
+      process.exit(0);
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+    await new Promise<void>(() => {});
+    return 0;
+  }
+
   if (args.cmd === "proxy") {
     if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
     const store = openAgentStore(args);
@@ -322,13 +560,27 @@ export async function main(argv: string[]): Promise<number> {
 
     const base = args.url.replace(/\/+$/, "");
     const targetMcpUrl = base + (args.mcpPath ?? "/api/mcp");
-    const proxy = await startProxy({ auth, targetMcpUrl, port: args.port ?? 8787 });
+    const alias = aliasFromUrl(base);
+    // 로컬 인증 토큰 기본 적용(doc26 §2-5) — 무토큰은 --insecure-no-token 명시 시에만
+    let proxy: { url: string; port: number; close(): Promise<void> };
+    if (args.insecureNoToken) {
+      console.error("⚠ --insecure-no-token: 같은 호스트의 모든 프로세스가 이 프록시(=에이전트 권한)를 호출할 수 있습니다");
+      proxy = await startProxy({ auth, targetMcpUrl, port: args.port ?? 8787 });
+      console.error(`\nClaude Code 등록:\n   claude mcp add --transport http ${alias} ${proxy.url}\n`);
+    } else {
+      const token = ensureToken(configDir(args.keyFile));
+      const daemon = await startDaemon({
+        targets: [{ alias, targetMcpUrl, auth }],
+        token,
+        port: args.port ?? 8787,
+      });
+      proxy = { url: daemon.urls[alias], port: daemon.port, close: daemon.close };
+      console.error(`\nClaude Code 등록(복사-실행):\n   ${mcpAddCommand(alias, daemon.port, token, true)}\n`);
+    }
 
     console.error(`✅ 로컬 MCP 프록시 실행: ${proxy.url}  →  ${targetMcpUrl}`);
     console.error(`   에이전트 DID: ${key.did}`);
     console.error(`   지문: ${key.fingerprint} (/publish 표시와 대조)`);
-    console.error(`\nClaude Code 등록(다른 터미널에서):`);
-    console.error(`   claude mcp add --transport http briefick ${proxy.url}\n`);
     console.error("(Ctrl+C 로 종료)");
 
     const stop = async () => {
