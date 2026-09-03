@@ -60,6 +60,12 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/** 요청 본문을 읽기 전에 조기 응답(401/503 등)할 때 클라이언트가 본문 전송 중 리셋을 겪지 않게 드레인. */
+function drainAnd(creq: http.IncomingMessage, respond: () => void): void {
+  creq.resume();
+  respond();
+}
+
 export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
   const host = opts.host ?? "127.0.0.1";
   const audit = opts.audit ?? ((line: string) => console.error(line));
@@ -72,7 +78,7 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
       return json(cres, 200, { status: "up" });
     }
     if (!tokenOk(opts.token, creq.headers.authorization)) {
-      return json(cres, 401, { error: "unauthorized", hint: "proxy-token 필요 — `status`가 등록 명령을 출력합니다" });
+      return drainAnd(creq, () => json(cres, 401, { error: "unauthorized", hint: "proxy-token 필요 — `status`가 등록 명령을 출력합니다" }));
     }
 
     // 라우팅: /<alias>/mcp… 또는 (RP 1개일 때) /mcp…
@@ -87,22 +93,22 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
         target = opts.targets[0];
         rest = path.slice("/mcp".length);
       } else {
-        return json(cres, 410, {
+        return drainAnd(creq, () => json(cres, 410, {
           error: "ambiguous_root",
           message: "RP가 여러 개입니다 — /<alias>/mcp 경로로 재등록하세요 (`status`가 명령을 출력)",
           aliases: opts.targets.map((t) => t.alias),
-        });
+        }));
       }
     }
     if (!target) {
-      return json(cres, 404, { error: "unknown_path", aliases: opts.targets.map((t) => t.alias) });
+      return drainAnd(creq, () => json(cres, 404, { error: "unknown_path", aliases: opts.targets.map((t) => t.alias) }));
     }
     if (!target.auth) {
-      return json(cres, 503, {
+      return drainAnd(creq, () => json(cres, 503, {
         error: "delegation_pending",
         alias: target.alias,
         message: target.pendingReason ?? "위임 미확보 — 지갑에서 승인 필요(`status` 참고)",
-      });
+      }));
     }
 
     // 요청 본문 버퍼링(작은 JSON) — 감사 로그에 JSON-RPC 메서드 기록 후 포워딩
