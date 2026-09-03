@@ -9,8 +9,15 @@ REPO="METADIUM/platform-agent-js"
 #   생성: minisign -G  → 비밀키는 CI secret(MINISIGN_SECRET_KEY), 공개키는 여기+문서에 게시.
 MINISIGN_PUB="RWT8kUm/J8uyqoOFON5wRNBUCOUtn4+nX0YeyYMItdo2J6iVNYd4uUAX"
 
-VERSION="${METAPASS_AGENT_VERSION:-$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)}"
-[ -n "$VERSION" ] || { echo "오류: 최신 릴리스를 찾지 못했습니다"; exit 1; }
+# 비공개 레포 지원: gh CLI(인증)가 있으면 그것으로, 없으면 익명 curl(공개 레포 전용).
+if command -v gh >/dev/null 2>&1; then
+  FETCH=gh
+  VERSION="${METAPASS_AGENT_VERSION:-$(gh release view -R "$REPO" --json tagName -q .tagName)}"
+else
+  FETCH=curl
+  VERSION="${METAPASS_AGENT_VERSION:-$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)}"
+fi
+[ -n "$VERSION" ] || { echo "오류: 최신 릴리스를 찾지 못했습니다 (비공개 레포는 gh CLI 로그인 필요: gh auth login)"; exit 1; }
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET=darwin-arm64 ;;
@@ -28,10 +35,15 @@ command -v minisign >/dev/null || {
 
 BASE="https://github.com/$REPO/releases/download/$VERSION"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-echo "↓ $VERSION ($TARGET)"
-curl -fsSL "$BASE/metapass-agent-$TARGET" -o "$TMP/metapass-agent"
-curl -fsSL "$BASE/SHA256SUMS" -o "$TMP/SHA256SUMS"
-curl -fsSL "$BASE/SHA256SUMS.minisig" -o "$TMP/SHA256SUMS.minisig"
+fetch() {
+  if [ "$FETCH" = gh ]; then gh release download "$VERSION" -R "$REPO" -p "$1" -O "$2" --clobber
+  else curl -fsSL "$BASE/$1" -o "$2" || { echo "오류: $1 다운로드 실패 — 비공개 레포면 gh CLI 설치·로그인 후 재실행"; exit 1; }
+  fi
+}
+echo "↓ $VERSION ($TARGET, via $FETCH)"
+fetch "metapass-agent-$TARGET" "$TMP/metapass-agent"
+fetch "SHA256SUMS" "$TMP/SHA256SUMS"
+fetch "SHA256SUMS.minisig" "$TMP/SHA256SUMS.minisig"
 
 # 1) 체크섬 파일 서명 검증 → 2) 바이너리 체크섬 대조 (둘 다 통과해야 설치)
 minisign -Vm "$TMP/SHA256SUMS" -P "$MINISIGN_PUB" -x "$TMP/SHA256SUMS.minisig" >/dev/null
