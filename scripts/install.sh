@@ -7,7 +7,7 @@ set -eu
 REPO="METADIUM/platform-agent-js"
 # ⚠ 릴리스 게이트: 첫 릴리스 전에 minisign 키쌍을 생성해 아래를 실제 공개키로 교체할 것.
 #   생성: minisign -G  → 비밀키는 CI secret(MINISIGN_SECRET_KEY), 공개키는 여기+문서에 게시.
-MINISIGN_PUB="__REPLACE_WITH_MINISIGN_PUBKEY__"
+MINISIGN_PUB="RWT8kUm/J8uyqoOFON5wRNBUCOUtn4+nX0YeyYMItdo2J6iVNYd4uUAX"
 
 VERSION="${METAPASS_AGENT_VERSION:-$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)}"
 [ -n "$VERSION" ] || { echo "오류: 최신 릴리스를 찾지 못했습니다"; exit 1; }
