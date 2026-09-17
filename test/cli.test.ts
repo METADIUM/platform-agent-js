@@ -66,6 +66,18 @@ describe("cli — 서버-로컬 상태 불일치 복구", () => {
     expect(s.hits.map((h) => h.path)).toContain("/api/agent/register");
   });
 
+  it("add: 로컬 플래그가 있어도 --code가 주어지면 서버에 재등록(회수 후 복구 경로)", async () => {
+    // 🔴 종전에는 add 가 로컬 플래그만 보고 code 를 **무시한 채 ✅** 를 찍었다 — 서버 토큰이
+    //    회수됐어도. 사용자는 재등록했다고 믿지만 데몬은 401 을 계속 돌린다(briefick#18).
+    const s = await stub({ "/api/agent/register": () => ({ json: { registered: true } }) });
+    cleanup.push(s.close);
+    const file = tmpKeyFile();
+    await seededStore(file, (u) => ({ registrations: { [u]: true } }), s.url);
+    const code = await main(["add", s.url, "--code", "NEW123", "--key-file", file]);
+    expect(code).toBe(0);
+    expect(s.hits.map((h) => h.path)).toContain("/api/agent/register");
+  });
+
   it("register: --code 없이 로컬 플래그면 스킵(서버 호출 없음)", async () => {
     const s = await stub({});
     cleanup.push(s.close);
@@ -83,6 +95,28 @@ describe("cli — 서버-로컬 상태 불일치 복구", () => {
     const file = tmpKeyFile();
     await seededStore(file, (u) => ({ credentials: { [u]: "VC1~" } }), s.url);
     await expect(main(["session", "--url", s.url, "--key-file", file])).rejects.toThrow(/새 페어링 코드/);
+  });
+
+  it("🔴 재등록 안내가 그대로 붙여넣어 실행되는가 (§7-2-A ⑤ · briefick#18)", async () => {
+    // 그대로 복사해 실행하는 문자열이라: 아는 값(url)은 채우고, 꺾쇠 placeholder 는 없어야 하고,
+    // 낡은 경로(/publish)를 가리키면 안 된다. 셸이 <URL> 을 입력 리다이렉션으로 읽어 깨진 그 자리.
+    const s = await stub({ "/api/agent/session/start": () => ({ status: 401, json: { error: "unknown agent" } }) });
+    cleanup.push(s.close);
+    const file = tmpKeyFile();
+    await seededStore(file, (u) => ({ credentials: { [u]: "VC1~" } }), s.url);
+    const msg = await main(["session", "--url", s.url, "--key-file", file]).then(
+      () => "예외가 나야 한다",
+      (e) => String(e instanceof Error ? e.message : e),
+    );
+    // ① 아는 값(url)이 채워져 있다 — <URL> 꺾쇠가 아니라 실제 URL
+    expect(msg).toContain(`--url ${s.url}`);
+    // ② 셸을 깨는 꺾쇠 placeholder 가 없다 (입력 리다이렉션으로 읽히는 자리)
+    expect(msg).not.toContain("<URL>");
+    expect(msg).not.toContain("<CODE>");
+    // ③ 낡은 경로를 가리키지 않는다 (briefick 이 /publish→/agents 로 옮김)
+    expect(msg).not.toContain("/publish");
+    // 명령 자체는 있어야 한다 (안내가 무엇을 하라는지)
+    expect(msg).toContain("register --url");
   });
 
   it("session: 세션 거부(위임 철회) → 캐시 폐기 + 재발급 회수 후 1회 재시도 성공", async () => {
