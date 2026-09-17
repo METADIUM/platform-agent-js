@@ -424,8 +424,12 @@ export async function main(argv: string[]): Promise<number> {
     if (cfg.rps.some((r) => r.alias === alias && r.url !== url)) {
       return fail(`alias 충돌: '${alias}' — --alias 로 다른 이름을 지정하세요`);
     }
-    // 페어링(register) 통합 — 이미 등록돼 있으면 code 불필요
-    if (!data.registrations?.[url]) {
+    // 페어링(register) 통합 — 이미 등록돼 있으면 code 불필요.
+    // ⚠️ **단, --code 가 주어지면 로컬 플래그가 true 여도 다시 등록한다** — 서버에서 토큰이 회수된 뒤
+    //    재등록하는 경로가 바로 이것이다(register 명령과 같은 규칙). 종전에는 로컬 플래그만 보고
+    //    **code 를 무시한 채 ✅ 를 찍어서**, 사용자는 재등록했다고 믿지만 데몬은 여전히 401 을 돌렸다
+    //    (metapass-saas 실측 · briefick#18). 「성공처럼 보이는 실패」의 CLI 판이다.
+    if (!data.registrations?.[url] || args.code) {
       if (!args.code) return fail("--code 필요(최초 페어링) — RP의 에이전트 등록 화면에서 발급");
       const client = new BriefickAgentClient({ baseUrl: url, key });
       await client.register(args.code);
