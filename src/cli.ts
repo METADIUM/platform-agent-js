@@ -257,6 +257,8 @@ async function connectTarget(
         credential,
         onRefresh: (_b, exp) => console.error(`[${rp.alias}] 세션 bearer 갱신 (만료 ${exp.toISOString()})`),
         onError: (e) => console.error(`[${rp.alias}] 세션 갱신 실패(재시도됨): ${e}`),
+        // 🔴 영구 실패(등록 회수 등) — 재시도해도 같은 답이라 루프가 멈춘다. 조용히 멈추지 않게 크게 남긴다.
+        onFatal: (e) => console.error(`[${rp.alias}] 세션 갱신 **영구 실패** — 재시도 중단. 재등록 필요(register --code): ${e}`),
       });
       try {
         await auth.start();
@@ -595,6 +597,7 @@ export async function main(argv: string[]): Promise<number> {
         credential,
         onRefresh: (_b, exp) => console.error(`[proxy] 세션 bearer 갱신 (만료 ${exp.toISOString()})`),
         onError: (e) => console.error(`[proxy] 세션 갱신 실패(재시도됨): ${e}`),
+        onFatal: (e) => console.error(`[proxy] 세션 갱신 **영구 실패** — 재시도 중단. 재등록 필요(register --code): ${e}`),
       });
       try {
         await auth.start();

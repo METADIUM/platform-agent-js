@@ -28,7 +28,7 @@ export {
   type SessionStart,
   type SessionResult,
 } from "./briefick.js";
-export { AgentAuth, type AgentAuthOptions } from "./agent.js";
+export { AgentAuth, isPermanentAuthFailure, type AgentAuthOptions } from "./agent.js";
 export { startProxy, type ProxyOptions, type RunningProxy, type BearerSource } from "./proxy.js";
 export {
   defaultKeyFile,
