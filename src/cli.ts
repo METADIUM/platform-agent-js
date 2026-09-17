@@ -93,14 +93,25 @@ async function keyFrom(store: AgentStore): Promise<{ key: AgentKey; data: KeySto
   return { key, data, created: true };
 }
 
-const REGISTER_GUIDE =
-  "서버에서 등록이 회수됐거나 등록되지 않은 에이전트입니다 — " +
-  "Briefick /publish에서 새 페어링 코드를 발급받아 `register --url <URL> --code <CODE> --force`를 실행하세요";
-
-/** 401 안내 — RP가 사유(미등록/회수됨)를 내려주면 함께 표기. */
-function registerGuide(e: AgentClientError): string {
+/**
+ * 401 안내 — RP가 사유(미등록/회수됨)를 내려주면 함께 표기.
+ *
+ * ⚠️ **이 문자열은 사용자가 그대로 복사해 실행한다**(§7-2-A ⑤ · briefick#18 실측). 그래서:
+ *   ① 아는 값(`url`)은 채운다 — `<URL>` 꺾쇠를 그대로 두면 셸이 **입력 리다이렉션**으로 읽어
+ *      «URL 이라는 파일이 없다»가 뜬다.
+ *   ② 사람이 바꿀 자리(코드)만 남기되 **꺾쇠 없는 placeholder** 로 — 그대로 붙여넣어도 셸이
+ *      안 깨지고 서버가 «잘못된 코드»로 명확히 거절한다.
+ *   ③ 경로(`/publish` 등)는 **기능 설명**으로 — 하드코딩하면 RP 가 UI 를 옮길 때 낡는다
+ *      (실제로 briefick 이 `/publish`→`/agents` 로 옮겨 이 문구가 404 를 가리켰다).
+ * 📌 `--force` 는 남긴다 — code 가 있으면 잉여지만 «덮어쓴다»가 명시적이고 해롭지 않다.
+ */
+function registerGuide(e: AgentClientError, url: string): string {
+  const base =
+    "서버에서 등록이 회수됐거나 등록되지 않은 에이전트입니다 — " +
+    "Briefick 에이전트 등록 페이지에서 새 페어링 코드를 발급받아 다음을 실행하세요(코드는 발급받은 값으로 바꾸세요):\n" +
+    `  register --url ${url} --code 발급받은코드 --force`;
   const detail = e.body && typeof e.body === "object" ? (e.body as { error?: unknown }).error : undefined;
-  return typeof detail === "string" && detail ? `${REGISTER_GUIDE} (서버 사유: ${detail})` : REGISTER_GUIDE;
+  return typeof detail === "string" && detail ? `${base}\n  (서버 사유: ${detail})` : base;
 }
 
 /** 지갑 승인·전달을 기다려 위임 VC를 회수하고 캐시에 저장한다(캐시 무시 — 항상 새로 회수). */
@@ -119,12 +130,12 @@ async function waitCredential(
       if (r.status === "no_request") {
         console.error(
           `  아직 이 에이전트(지문 ${key.fingerprint}) 대상 위임 요청이 없습니다 — ` +
-            "Briefick /publish에서 지문을 대조해 위임을 발급하세요",
+            "Briefick 에이전트 페이지에서 지문을 대조해 위임을 발급하세요",
         );
       } else if (isRequestExpired(r)) {
         // 만료된 요청을 "승인 대기"로 오표시하지 않는다 — RP status:"expired" 또는 expiresAt로 판정.
         console.error(
-          `  위임 요청이 만료됐습니다(nonce ${r.lastRequest?.nonce ?? "?"}) — Briefick /publish에서 위임을 다시 발급하세요`,
+          `  위임 요청이 만료됐습니다(nonce ${r.lastRequest?.nonce ?? "?"}) — Briefick 에이전트 페이지에서 위임을 다시 발급하세요`,
         );
       } else if (r.status === "pending" && r.lastRequest) {
         console.error(
@@ -135,7 +146,7 @@ async function waitCredential(
   }).catch((e) => {
     // 미등록/등록 회수 — 원인 모를 에러 대신 복구 절차 안내.
     if (e instanceof AgentClientError && (e.httpStatus === 401 || e.message.includes("등록되지 않은"))) {
-      throw new AgentClientError(registerGuide(e), e.httpStatus, e.body);
+      throw new AgentClientError(registerGuide(e, url), e.httpStatus, e.body);
     }
     throw e;
   });
@@ -181,7 +192,7 @@ async function recoverSessionFailure(
 ): Promise<string | null> {
   if (!(e instanceof AgentClientError)) return null;
   if (e.httpStatus === 401) {
-    throw new AgentClientError(registerGuide(e), e.httpStatus, e.body);
+    throw new AgentClientError(registerGuide(e, url), e.httpStatus, e.body);
   }
   if (e.message.includes("세션 거부")) {
     console.error(`위임이 무효화됐습니다(${e.message}) — 캐시를 비우고 지갑 재발급 승인 대기로 전환합니다`);
@@ -315,7 +326,7 @@ const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 
 
 옵션:
   --url <URL>        Briefick 베이스 URL (또는 env BRIEFICK_URL)
-  --code <CODE>      /publish 페어링 코드 (또는 env PAIRING_CODE) — register 최초 1회만
+  --code <CODE>      에이전트 페이지의 페어링 코드 (또는 env PAIRING_CODE) — register 최초 1회만
   --port <N>         proxy 리슨 포트 (기본 8787, 127.0.0.1 전용)
   --mcp-path <PATH>  RP MCP 경로 (기본 /api/mcp)
   --key-file <PATH>  키 파일 경로 (기본 ~/.metapass-agent/key.json, env METAPASS_AGENT_KEY_FILE)
@@ -336,8 +347,8 @@ export async function main(argv: string[]): Promise<number> {
     const store = openAgentStore(args);
     const { key, created } = await keyFrom(store);
     console.log(key.did);
-    // 모든 did:jwk는 앞자리가 같아 육안 구분 불가 — /publish가 표시하는 지문과 1:1 대조용.
-    console.error(`지문: ${key.fingerprint} (Briefick /publish의 에이전트 지문과 대조)`);
+    // 모든 did:jwk는 앞자리가 같아 육안 구분 불가 — 에이전트 페이지가 표시하는 지문과 1:1 대조용.
+    console.error(`지문: ${key.fingerprint} (Briefick 에이전트 페이지의 지문과 대조)`);
     if (created) console.error(`(신규 키 생성·저장: ${store.location})`);
     return 0;
   }
@@ -351,17 +362,17 @@ export async function main(argv: string[]): Promise<number> {
     if (data.registrations?.[args.url] && !args.force && !args.code) {
       console.log(
         `이미 등록됨(로컬 기록) — 재사용합니다.\n  DID: ${key.did}\n  지문: ${key.fingerprint}\n  키: ${store.location}\n` +
-          `  서버에서 등록이 회수된 상태라면 /publish의 새 코드로 --code를 주어 다시 실행하세요`,
+          `  서버에서 등록이 회수된 상태라면 에이전트 페이지의 새 코드로 --code를 주어 다시 실행하세요`,
       );
       return 0;
     }
-    if (!args.code) return fail("--code (또는 PAIRING_CODE) 필요 — Briefick /publish 페어링 코드");
+    if (!args.code) return fail("--code (또는 PAIRING_CODE) 필요 — Briefick 에이전트 페이지의 페어링 코드");
     const client = new BriefickAgentClient({ baseUrl: args.url, key });
     await client.register(args.code);
     data.registrations = { ...(data.registrations ?? {}), [args.url]: true };
     store.save(data);
     console.log(
-      `✅ 등록 완료.\n  DID: ${key.did}\n  지문: ${key.fingerprint} (/publish 표시와 대조)\n  키 저장: ${store.location} — 이후 재실행 시 재사용(재등록 불필요)${
+      `✅ 등록 완료.\n  DID: ${key.did}\n  지문: ${key.fingerprint} (에이전트 페이지 표시와 대조)\n  키 저장: ${store.location} — 이후 재실행 시 재사용(재등록 불필요)${
         created ? "" : "\n  (기존 키 재사용)"
       }`,
     );
@@ -632,7 +643,7 @@ export async function main(argv: string[]): Promise<number> {
 
     console.error(`✅ 로컬 MCP 프록시 실행: ${proxy.url}  →  ${targetMcpUrl}`);
     console.error(`   에이전트 DID: ${key.did}`);
-    console.error(`   지문: ${key.fingerprint} (/publish 표시와 대조)`);
+    console.error(`   지문: ${key.fingerprint} (에이전트 페이지 표시와 대조)`);
     console.error("(Ctrl+C 로 종료)");
 
     const stop = async () => {
