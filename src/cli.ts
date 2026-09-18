@@ -51,6 +51,8 @@ interface Args {
    * **재부팅 뒤**라 원인과 증상이 가장 멀다(metapass-saas 실측).
    */
   unknownFlags?: string[];
+  /** `--port` 에 쓸 수 없는 값이 왔다. 비어 있지 않으면 실행하지 않는다. */
+  badPort?: string[];
 }
 
 function parse(argv: string[]): Args {
@@ -71,7 +73,16 @@ function parse(argv: string[]): Args {
     else if (a === "--code") out.code = val();
     else if (a === "--key-file") out.keyFile = val();
     else if (a === "--key-backend") out.keyBackend = val();
-    else if (a === "--port") out.port = Number(val());
+    else if (a === "--port") {
+      // 🟡 **빈 값·비수치를 거부한다**(briefick 리뷰). `Number("")` 는 **0** 이고
+      //    `0 ?? 8787` 도 0 이라, `--port=` 하나로 **OS 임의 배정 포트**에 리슨했다.
+      //    ⚠️ 그 자리에서는 출력이 실제 포트를 찍어 «된 것처럼» 보이고, 깨지는 건
+      //       **다음 기동** 때다(등록된 MCP URL 은 안 바뀐다) — 증상이 원인에서 멀다.
+      const raw2 = val();
+      const n = Number(raw2);
+      if (!Number.isInteger(n) || n < 1 || n > 65535) (out.badPort ??= []).push(`--port=${raw2}`);
+      else out.port = n;
+    }
     else if (a === "--mcp-path") out.mcpPath = val();
     else if (a === "--alias") out.alias = val();
     else if (a === "--insecure-no-token") out.insecureNoToken = true;
@@ -82,7 +93,11 @@ function parse(argv: string[]): Args {
     else if (a === "-v" || a === "--version") out.cmd = "version";
     // ⚠️ `-` 로 시작하면 **위치 인자가 아니다.** rest 로 흘려보내면 명령/하위명령 자리에 앉아
     //    조용히 무시된다 — 그 침묵이 이 변경이 없애려는 것이다.
-    else if (a.startsWith("-")) (out.unknownFlags ??= []).push(raw);
+    // 🟡 **이름만 보고한다**(briefick 리뷰). 원본을 찍으면 `--cod=SECRET123` 처럼
+    //    **값이 stderr 로 새어** CI 로그·이슈 붙여넣기로 간다. 페어링 코드는 붙여넣는
+    //    값이라 오타가 나는 자리가 정확히 거기다. ⚠️ 값을 찍어서 **얻는 게 없다** —
+    //    사용자가 방금 친 것이고 고칠 것은 **이름**이다.
+    else if (a.startsWith("-")) (out.unknownFlags ??= []).push(a);
     else rest.push(raw);
   }
   out.cmd ??= rest[0];
@@ -356,7 +371,8 @@ const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 
 옵션:
   --url <URL>        Briefick 베이스 URL (또는 env BRIEFICK_URL)
   --code <CODE>      에이전트 페이지의 페어링 코드 (또는 env PAIRING_CODE) — register 최초 1회만
-  --port <N>         proxy 리슨 포트 (기본 8787, 127.0.0.1 전용)
+  --port <N>         proxy·up 리슨 포트 (기본 8787, 127.0.0.1 전용)
+                     up 에 주면 **이번 실행만** — 설정에 저장하지 않는다
   --mcp-path <PATH>  RP MCP 경로 (기본 /api/mcp)
   --key-file <PATH>  키 파일 경로 (기본 ~/.metapass-agent/key.json, env METAPASS_AGENT_KEY_FILE)
   --key-backend <B>  키 저장 백엔드: file(기본) | keychain (env METAPASS_AGENT_KEY_BACKEND)
@@ -375,6 +391,10 @@ export async function main(argv: string[]): Promise<number> {
   // 🔴 **모르는 옵션이면 아무것도 하지 않는다.** 종전엔 조용히 무시돼 «된 것처럼» 보였다.
   //    ⚠️ 파괴적 변경이다 — 여분 플래그를 넘기던 스크립트가 깨진다. 그래도 이쪽이 맞다:
   //    지금 그 스크립트는 **「되고 있다고 믿는」** 상태이고, 깨지는 쪽이 정보가 많다.
+  if (args.badPort?.length) {
+    return fail(`포트 값이 잘못됐다: ${args.badPort.join(" ")} — 1~65535 의 정수여야 한다.`);
+  }
+
   if (args.unknownFlags?.length) {
     return fail(`알 수 없는 옵션: ${args.unknownFlags.join(" ")}\n\n${HELP}`);
   }
@@ -636,8 +656,16 @@ export async function main(argv: string[]): Promise<number> {
       void connectTarget(target, client, data, rp, store, key);
     }
 
-    const daemon = await startDaemon({ targets, token, port: cfg.port });
-    if (cfg.port !== daemon.port) {
+    // 🔴 **`up` 도 `--port` 를 읽는다**(briefick 리뷰). 종전엔 `cfg.port` 만 봐서
+    //    `up --port 9999` 가 **조용히 무시**됐다 — 파서가 아는 플래그라 거부망에도 안 걸린다.
+    //    ⚠️ 이 PR 이 없애려는 침묵과 같은 모양인데, 그건 **판이 달라** 생긴 것이고 이건
+    //       **같은 판 안에서** 나는 침묵이라 더 나쁘다. 게다가 `up` 이 권장 명령이다.
+    //    📌 HELP 가 `--port` 를 「proxy 리슨 포트」로만 적어 뒀는데, `up` 설명은
+    //       `127.0.0.1:<port>/…` 를 말한다 — **문서가 서로 어긋났다.** 둘 다 고친다.
+    const daemon = await startDaemon({ targets, token, port: args.port ?? cfg.port });
+    // ⚠️ 명시한 `--port` 는 **이번 실행만** — 저장은 종전처럼 «자동 배정된 포트 고정» 일 때만.
+    //    안 그러면 한 번의 `--port` 가 이후 기동을 **영구히** 바꾼다.
+    if (args.port == null && cfg.port !== daemon.port) {
       cfg.port = daemon.port; // 최초 자동 배정 포트 고정(다중 계정 서버에서 사용자별로 갈림)
       saveConfig(dir, cfg);
     }
