@@ -57,14 +57,23 @@ function parse(argv: string[]): Args {
   const out: Args = { keyFile: "", force: false, insecureNoToken: false, install: false, uninstallFlag: false };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--url") out.url = argv[++i];
-    else if (a === "--code") out.code = argv[++i];
-    else if (a === "--key-file") out.keyFile = argv[++i];
-    else if (a === "--key-backend") out.keyBackend = argv[++i];
-    else if (a === "--port") out.port = Number(argv[++i]);
-    else if (a === "--mcp-path") out.mcpPath = argv[++i];
-    else if (a === "--alias") out.alias = argv[++i];
+    const raw = argv[i];
+    // 🟡 **`--port=8787` 도 아는 옵션이다**(briefick 리뷰). 종전에는 통째로 비교해서
+    //    「알 수 없는 옵션」이라 말했고, 사용자는 **있는 이름을 오타로 의심**하러 갔다.
+    //    ⚠️ 0.4.1 에서 등호형은 `rest` 로 흘러 **조용히 무시**됐다 — 이 변경이 없애려는
+    //       침묵 중 하나다. 이름과 값을 갈라 두 형태를 같게 다룬다.
+    const eq = raw.startsWith("-") ? raw.indexOf("=") : -1;
+    const a = eq > 0 ? raw.slice(0, eq) : raw;
+    const inline = eq > 0 ? raw.slice(eq + 1) : undefined;
+    /** 값이 필요한 옵션 — `--x=v` 면 그 값을, 아니면 다음 인자를 쓴다. */
+    const val = (): string => inline ?? argv[++i];
+    if (a === "--url") out.url = val();
+    else if (a === "--code") out.code = val();
+    else if (a === "--key-file") out.keyFile = val();
+    else if (a === "--key-backend") out.keyBackend = val();
+    else if (a === "--port") out.port = Number(val());
+    else if (a === "--mcp-path") out.mcpPath = val();
+    else if (a === "--alias") out.alias = val();
     else if (a === "--insecure-no-token") out.insecureNoToken = true;
     else if (a === "--install") out.install = true;
     else if (a === "--uninstall") out.uninstallFlag = true;
@@ -73,8 +82,8 @@ function parse(argv: string[]): Args {
     else if (a === "-v" || a === "--version") out.cmd = "version";
     // ⚠️ `-` 로 시작하면 **위치 인자가 아니다.** rest 로 흘려보내면 명령/하위명령 자리에 앉아
     //    조용히 무시된다 — 그 침묵이 이 변경이 없애려는 것이다.
-    else if (a.startsWith("-")) (out.unknownFlags ??= []).push(a);
-    else rest.push(a);
+    else if (a.startsWith("-")) (out.unknownFlags ??= []).push(raw);
+    else rest.push(raw);
   }
   out.cmd ??= rest[0];
   out.sub = rest[1];
@@ -371,7 +380,22 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (args.cmd === "version") {
-    console.log(packageVersion());
+    const v = packageVersion();
+    // 🔴 **못 읽으면 못 읽었다고 말한다.** 종전 초안은 `"unknown"` 을 찍고 **exit 0** 이었는데,
+    //    그건 이 변경의 전제(«침묵이 위험하다»)를 **이 명령 자신이** 깨는 것이었다(briefick 리뷰).
+    //    ⚠️ 「0.4.0 이상 필요」를 읽고 확인하러 온 사람이 `unknown` + 성공 종료를 받으면
+    //       **확인했다고 믿는다.** 스크립트도 그 값을 받는다.
+    //    📌 그리고 이 분기가 실제로 걸릴 자리가 있다 — **SEA 단일 바이너리**에서
+    //       `import.meta.url` 기준 상대경로가 안 설 수 있고, 그 경로가 하필
+    //       **`--version` 이 가장 필요한 자리**다(npx 사용자는 명령에 박힌 핀으로 이미 안다).
+    if (v === null) {
+      return fail(
+        "판을 읽지 못했다 — 이 실행본 안에서 package.json 을 찾을 수 없다.\n" +
+          "  npx 로 쓰는 중이면 명령에 박힌 버전 스펙이 답이다(예: @^0.4.0).\n" +
+          "  설치형(단일 바이너리)이면 설치 명령을 다시 실행해 판을 맞춰라.",
+      );
+    }
+    console.log(v);
     return 0;
   }
 
@@ -707,12 +731,12 @@ export async function main(argv: string[]): Promise<number> {
  *    거부」가 들어와도 **옛 판을 쓰는 사람에겐 안 온다** — 그 사람의 CLI 는 여전히 침묵한다.
  *    그래서 둘은 독립이다(metapass-saas·briefick 실측).
  */
-function packageVersion(): string {
+function packageVersion(): string | null {
   try {
     const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
-    return (JSON.parse(raw) as { version?: string }).version ?? "unknown";
+    return (JSON.parse(raw) as { version?: string }).version ?? null;
   } catch {
-    return "unknown";
+    return null;
   }
 }
 

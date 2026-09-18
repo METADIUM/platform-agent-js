@@ -241,6 +241,24 @@ describe("모르는 옵션은 거부한다 · --version", () => {
     expect(pkg.version).toMatch(/^\d+\.\d+\.\d+/);
   });
 
+
+  it("🟡 `--flag=value` 도 **아는 옵션**이다 — 거부되지 않는다", async () => {
+    // 🔴 종전엔 통째로 비교해 「알 수 없는 옵션: --port=8787」이라 말했고, 사용자는
+    //    **있는 이름을 오타로 의심**하러 갔다(briefick 리뷰). 0.4.1 에서는 아예 조용히
+    //    무시됐다 — 이 변경이 없애려는 침묵 중 하나다.
+    // ⚠️ `--version` 을 붙여 **일찍 끝나게** 한다(거부되면 1, 인식되면 0).
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await main(["--port=8787", "--version"])).toBe(0);
+      expect(await main(["--key-backend=file", "--version"])).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("🟢 대조군 — 등호형이라도 **모르는 이름**이면 거부한다", async () => {
+    expect(await main(["--porrt=8787", "--version"])).toBe(1);
+  });
   it("⚠️ 모르는 옵션이 이기게 한다 — 아는 명령과 섞여도 실행하지 않는다", async () => {
     // 여기서 0 이 나오면 「판만 찍고 넘어갔다」는 뜻이고, 그건 조용한 무시의 재발이다.
     expect(await main(["--version", "--bogus-flag-xyz"])).toBe(1);
