@@ -1,6 +1,6 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import http from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../src/cli.js";
@@ -181,5 +181,122 @@ describe("cli — 서버-로컬 상태 불일치 복구", () => {
     const code = await main(["credentials", "clear", "--key-file", file]);
     expect(code).toBe(0);
     expect(loadStore(file)?.credentials).toEqual({});
+  });
+});
+
+/**
+ * 🔴 **모르는 플래그가 조용히 무시되던 것** — metapass-saas 실측(배포본 0.3.0·0.4.1 을 깔고 실행).
+ *
+ * 파서가 인식 못 한 인자를 `rest` 로 흘려보냈고, `rest` 는 **두 자리**로 갈렸다:
+ * ```
+ * out.cmd ??= rest[0];   // --version 단독 → 명령 자리 → 「알 수 없는 명령」 → 시끄럽게 죽음
+ * out.sub  = rest[1];    // status --bogus → 하위명령 자리 → status 는 안 본다 → **침묵**
+ * ```
+ * ⚠️ 위험한 쪽은 **침묵**이다. `up --install` 을 `--install` 이 없던 판(0.3.0)에서 돌리면
+ * 그냥 `up` 이 되어 프록시는 뜨고 **상주 등록만 빠진다** — 드러나는 시점이 **재부팅 뒤**라
+ * 원인과 증상이 가장 멀다.
+ *
+ * 📌 그래서 **두 자리를 다 덮는다.**
+ */
+describe("모르는 옵션은 거부한다 · --version", () => {
+  it("🔴 하위명령 자리의 모르는 플래그 — 종전엔 **조용히 무시**됐다", async () => {
+    const code = await main(["status", "--bogus-flag-xyz"]);
+    expect(code).toBe(1);
+  });
+
+  it("🔴 명령 자리의 모르는 플래그", async () => {
+    const code = await main(["--bogus-flag-xyz"]);
+    expect(code).toBe(1);
+  });
+
+  it("🔴 실제로 문 자리였던 것 — 옛 판에 없던 플래그", async () => {
+    // `--install` 은 이 판엔 **있다**. 없던 판을 흉내내는 대신 «모르는 것» 의 대표로 하나 더 본다.
+    expect(await main(["up", "--not-a-real-flag"])).toBe(1);
+  });
+
+  it("🟢 대조군 — 아는 플래그는 거부되지 않는다", async () => {
+    // `--version` 은 아는 플래그다. 거부(1)가 아니라 판 출력(0)이어야 한다.
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await main(["--version"])).toBe(0);
+      expect(await main(["-v"])).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("🟢 --version 이 **실제 판**을 찍는다 — package.json 과 같아야 한다", async () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((m?: unknown) => { lines.push(String(m)); });
+    try {
+      await main(["--version"]);
+    } finally {
+      spy.mockRestore();
+    }
+    // ⚠️ 「무언가 찍는다」가 아니라 **그 값**을 본다 — 상수를 따로 적으면 갈린다.
+    expect(lines).toEqual([pkg.version]);
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+
+  it("🟡 `--flag=value` 도 **아는 옵션**이다 — 거부되지 않는다", async () => {
+    // 🔴 종전엔 통째로 비교해 「알 수 없는 옵션: --port=8787」이라 말했고, 사용자는
+    //    **있는 이름을 오타로 의심**하러 갔다(briefick 리뷰). 0.4.1 에서는 아예 조용히
+    //    무시됐다 — 이 변경이 없애려는 침묵 중 하나다.
+    // ⚠️ `--version` 을 붙여 **일찍 끝나게** 한다(거부되면 1, 인식되면 0).
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await main(["--port=8787", "--version"])).toBe(0);
+      expect(await main(["--key-backend=file", "--version"])).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("🟢 대조군 — 등호형이라도 **모르는 이름**이면 거부한다", async () => {
+    expect(await main(["--porrt=8787", "--version"])).toBe(1);
+  });
+
+  it("🟡 `--port` 에 쓸 수 없는 값은 **거부**한다 — 빈 값이 0(임의 포트)이 되던 것", async () => {
+    // 🔴 `Number("")` 는 0 이고 `0 ?? 8787` 도 0 이라, `--port=` 하나로 **OS 임의 배정**
+    //    포트에 리슨했다. 그 자리에선 출력이 실제 포트를 찍어 «된 것처럼» 보이고,
+    //    깨지는 건 **다음 기동** 때다(briefick 리뷰).
+    expect(await main(["--port=", "--version"])).toBe(1);
+    expect(await main(["--port=abc", "--version"])).toBe(1);
+    expect(await main(["--port=0", "--version"])).toBe(1);
+    expect(await main(["--port=70000", "--version"])).toBe(1);
+  });
+
+  it("🟢 대조군 — 쓸 수 있는 포트는 통과한다", async () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await main(["--port=9999", "--version"])).toBe(0);
+      expect(await main(["--port", "9999", "--version"])).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("🟡 모르는 옵션은 **이름만** 찍는다 — 값이 stderr 로 새지 않는다", async () => {
+    // 🔴 `--cod=SECRET123` 같은 오타에서 **값이 그대로 로그에 남았다**. 페어링 코드는
+    //    붙여넣는 값이라 오타가 나는 자리가 정확히 거기이고, stderr 는 CI 로그·이슈로 간다.
+    //    ⚠️ 값을 찍어서 얻는 게 없다 — 사용자가 방금 친 것이고 고칠 것은 **이름**이다.
+    const err: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((m?: unknown) => { err.push(String(m)); });
+    try {
+      expect(await main(["--cod=SECRET123", "--version"])).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+    const joined = err.join("\n");
+    expect(joined).toContain("--cod");
+    expect(joined).not.toContain("SECRET123");   // ← 값이 새면 여기서 잡힌다
+  });
+  it("⚠️ 모르는 옵션이 이기게 한다 — 아는 명령과 섞여도 실행하지 않는다", async () => {
+    // 여기서 0 이 나오면 「판만 찍고 넘어갔다」는 뜻이고, 그건 조용한 무시의 재발이다.
+    expect(await main(["--version", "--bogus-flag-xyz"])).toBe(1);
   });
 });

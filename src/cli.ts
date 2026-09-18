@@ -8,6 +8,7 @@
  * 키는 `~/.metapass-agent/key.json`에 영속 → **최초 1회만 등록, 이후 재사용**. `--url`/`--code`는
  * 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
  */
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AgentKey } from "./key.js";
@@ -37,26 +38,67 @@ interface Args {
   insecureNoToken: boolean;
   install: boolean;
   uninstallFlag: boolean;
+  /**
+   * 인식하지 못한 `-`/`--` 인자. **비어 있지 않으면 실행하지 않는다.**
+   *
+   * 🔴 종전에는 이것이 `rest` 로 떨어져 **두 자리 중 하나**에 앉았다(`out.cmd ??= rest[0]`):
+   * ```
+   * status --bogus   → rest[1] = sub 자리 → status 는 sub 를 안 본다 → **조용히 무시**
+   * --version        → rest[0] = cmd 자리 → 「알 수 없는 명령」 → 시끄럽게 죽음
+   * ```
+   * ⚠️ 앞쪽이 위험하다 — `up --install` 을 `--install` 없는 판(0.3.0)에서 돌리면 **그냥 `up`** 이
+   * 되고, 프록시는 떠서 «된 것처럼» 보이는데 **상주 등록만 빠진다.** 드러나는 시점이
+   * **재부팅 뒤**라 원인과 증상이 가장 멀다(metapass-saas 실측).
+   */
+  unknownFlags?: string[];
+  /** `--port` 에 쓸 수 없는 값이 왔다. 비어 있지 않으면 실행하지 않는다. */
+  badPort?: string[];
 }
 
 function parse(argv: string[]): Args {
   const out: Args = { keyFile: "", force: false, insecureNoToken: false, install: false, uninstallFlag: false };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--url") out.url = argv[++i];
-    else if (a === "--code") out.code = argv[++i];
-    else if (a === "--key-file") out.keyFile = argv[++i];
-    else if (a === "--key-backend") out.keyBackend = argv[++i];
-    else if (a === "--port") out.port = Number(argv[++i]);
-    else if (a === "--mcp-path") out.mcpPath = argv[++i];
-    else if (a === "--alias") out.alias = argv[++i];
+    const raw = argv[i];
+    // 🟡 **`--port=8787` 도 아는 옵션이다**(briefick 리뷰). 종전에는 통째로 비교해서
+    //    「알 수 없는 옵션」이라 말했고, 사용자는 **있는 이름을 오타로 의심**하러 갔다.
+    //    ⚠️ 0.4.1 에서 등호형은 `rest` 로 흘러 **조용히 무시**됐다 — 이 변경이 없애려는
+    //       침묵 중 하나다. 이름과 값을 갈라 두 형태를 같게 다룬다.
+    const eq = raw.startsWith("-") ? raw.indexOf("=") : -1;
+    const a = eq > 0 ? raw.slice(0, eq) : raw;
+    const inline = eq > 0 ? raw.slice(eq + 1) : undefined;
+    /** 값이 필요한 옵션 — `--x=v` 면 그 값을, 아니면 다음 인자를 쓴다. */
+    const val = (): string => inline ?? argv[++i];
+    if (a === "--url") out.url = val();
+    else if (a === "--code") out.code = val();
+    else if (a === "--key-file") out.keyFile = val();
+    else if (a === "--key-backend") out.keyBackend = val();
+    else if (a === "--port") {
+      // 🟡 **빈 값·비수치를 거부한다**(briefick 리뷰). `Number("")` 는 **0** 이고
+      //    `0 ?? 8787` 도 0 이라, `--port=` 하나로 **OS 임의 배정 포트**에 리슨했다.
+      //    ⚠️ 그 자리에서는 출력이 실제 포트를 찍어 «된 것처럼» 보이고, 깨지는 건
+      //       **다음 기동** 때다(등록된 MCP URL 은 안 바뀐다) — 증상이 원인에서 멀다.
+      const raw2 = val();
+      const n = Number(raw2);
+      if (!Number.isInteger(n) || n < 1 || n > 65535) (out.badPort ??= []).push(`--port=${raw2}`);
+      else out.port = n;
+    }
+    else if (a === "--mcp-path") out.mcpPath = val();
+    else if (a === "--alias") out.alias = val();
     else if (a === "--insecure-no-token") out.insecureNoToken = true;
     else if (a === "--install") out.install = true;
     else if (a === "--uninstall") out.uninstallFlag = true;
     else if (a === "--force") out.force = true;
     else if (a === "-h" || a === "--help") out.cmd = "help";
-    else rest.push(a);
+    else if (a === "-v" || a === "--version") out.cmd = "version";
+    // ⚠️ `-` 로 시작하면 **위치 인자가 아니다.** rest 로 흘려보내면 명령/하위명령 자리에 앉아
+    //    조용히 무시된다 — 그 침묵이 이 변경이 없애려는 것이다.
+    // 🟡 **이름만 보고한다**(briefick 리뷰). 원본을 찍으면 `--cod=SECRET123` 처럼
+    //    **값이 stderr 로 새어** CI 로그·이슈 붙여넣기로 간다. 페어링 코드는 붙여넣는
+    //    값이라 오타가 나는 자리가 정확히 거기다. ⚠️ 값을 찍어서 **얻는 게 없다** —
+    //    사용자가 방금 친 것이고 고칠 것은 **이름**이다.
+    else if (a.startsWith("-")) (out.unknownFlags ??= []).push(a);
+    else rest.push(raw);
   }
   out.cmd ??= rest[0];
   out.sub = rest[1];
@@ -329,16 +371,53 @@ const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 
 옵션:
   --url <URL>        Briefick 베이스 URL (또는 env BRIEFICK_URL)
   --code <CODE>      에이전트 페이지의 페어링 코드 (또는 env PAIRING_CODE) — register 최초 1회만
-  --port <N>         proxy 리슨 포트 (기본 8787, 127.0.0.1 전용)
+  --port <N>         proxy·up 리슨 포트 (기본 8787, 127.0.0.1 전용)
+                     up 에 주면 **이번 실행만** — 설정에 저장하지 않는다
   --mcp-path <PATH>  RP MCP 경로 (기본 /api/mcp)
   --key-file <PATH>  키 파일 경로 (기본 ~/.metapass-agent/key.json, env METAPASS_AGENT_KEY_FILE)
   --key-backend <B>  키 저장 백엔드: file(기본) | keychain (env METAPASS_AGENT_KEY_BACKEND)
                      keychain = macOS Keychain(security) / Linux libsecret(secret-tool) — 평문 파일 없음.
                      기존 key.json이 있으면 최초 1회 자동 이관(이관 후 파일 삭제 권장)
-  --force            이미 등록됐어도 재등록`;
+  --force            이미 등록됐어도 재등록
+  -v, --version      이 CLI 의 판을 출력
+  -h, --help         이 도움말
+
+⚠️ 모르는 옵션은 **거부**한다(무시하지 않는다). 옛 판에서 새 플래그를 쓰면 조용히 빠져
+   «된 것처럼» 보이던 것을 막는다 — 예: 0.3.0 에서 "up --install" 은 그냥 "up" 이었다.`;
 
 export async function main(argv: string[]): Promise<number> {
   const args = parse(argv);
+
+  // 🔴 **모르는 옵션이면 아무것도 하지 않는다.** 종전엔 조용히 무시돼 «된 것처럼» 보였다.
+  //    ⚠️ 파괴적 변경이다 — 여분 플래그를 넘기던 스크립트가 깨진다. 그래도 이쪽이 맞다:
+  //    지금 그 스크립트는 **「되고 있다고 믿는」** 상태이고, 깨지는 쪽이 정보가 많다.
+  if (args.badPort?.length) {
+    return fail(`포트 값이 잘못됐다: ${args.badPort.join(" ")} — 1~65535 의 정수여야 한다.`);
+  }
+
+  if (args.unknownFlags?.length) {
+    return fail(`알 수 없는 옵션: ${args.unknownFlags.join(" ")}\n\n${HELP}`);
+  }
+
+  if (args.cmd === "version") {
+    const v = packageVersion();
+    // 🔴 **못 읽으면 못 읽었다고 말한다.** 종전 초안은 `"unknown"` 을 찍고 **exit 0** 이었는데,
+    //    그건 이 변경의 전제(«침묵이 위험하다»)를 **이 명령 자신이** 깨는 것이었다(briefick 리뷰).
+    //    ⚠️ 「0.4.0 이상 필요」를 읽고 확인하러 온 사람이 `unknown` + 성공 종료를 받으면
+    //       **확인했다고 믿는다.** 스크립트도 그 값을 받는다.
+    //    📌 그리고 이 분기가 실제로 걸릴 자리가 있다 — **SEA 단일 바이너리**에서
+    //       `import.meta.url` 기준 상대경로가 안 설 수 있고, 그 경로가 하필
+    //       **`--version` 이 가장 필요한 자리**다(npx 사용자는 명령에 박힌 핀으로 이미 안다).
+    if (v === null) {
+      return fail(
+        "판을 읽지 못했다 — 이 실행본 안에서 package.json 을 찾을 수 없다.\n" +
+          "  npx 로 쓰는 중이면 명령에 박힌 버전 스펙이 답이다(예: @^0.4.0).\n" +
+          "  설치형(단일 바이너리)이면 설치 명령을 다시 실행해 판을 맞춰라.",
+      );
+    }
+    console.log(v);
+    return 0;
+  }
 
   if (!args.cmd || args.cmd === "help") {
     console.log(HELP);
@@ -577,8 +656,16 @@ export async function main(argv: string[]): Promise<number> {
       void connectTarget(target, client, data, rp, store, key);
     }
 
-    const daemon = await startDaemon({ targets, token, port: cfg.port });
-    if (cfg.port !== daemon.port) {
+    // 🔴 **`up` 도 `--port` 를 읽는다**(briefick 리뷰). 종전엔 `cfg.port` 만 봐서
+    //    `up --port 9999` 가 **조용히 무시**됐다 — 파서가 아는 플래그라 거부망에도 안 걸린다.
+    //    ⚠️ 이 PR 이 없애려는 침묵과 같은 모양인데, 그건 **판이 달라** 생긴 것이고 이건
+    //       **같은 판 안에서** 나는 침묵이라 더 나쁘다. 게다가 `up` 이 권장 명령이다.
+    //    📌 HELP 가 `--port` 를 「proxy 리슨 포트」로만 적어 뒀는데, `up` 설명은
+    //       `127.0.0.1:<port>/…` 를 말한다 — **문서가 서로 어긋났다.** 둘 다 고친다.
+    const daemon = await startDaemon({ targets, token, port: args.port ?? cfg.port });
+    // ⚠️ 명시한 `--port` 는 **이번 실행만** — 저장은 종전처럼 «자동 배정된 포트 고정» 일 때만.
+    //    안 그러면 한 번의 `--port` 가 이후 기동을 **영구히** 바꾼다.
+    if (args.port == null && cfg.port !== daemon.port) {
       cfg.port = daemon.port; // 최초 자동 배정 포트 고정(다중 계정 서버에서 사용자별로 갈림)
       saveConfig(dir, cfg);
     }
@@ -661,6 +748,24 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   return fail(`알 수 없는 명령: ${args.cmd}\n\n${HELP}`);
+}
+
+/**
+ * 이 패키지의 판. `package.json` 을 **런타임에 읽는다**(빌드 시 박지 않는다).
+ *
+ * ⚠️ `src/`(tsx)와 `dist/`(빌드본)가 **둘 다 패키지 루트 한 칸 아래**라 같은 상대경로가 선다.
+ * 📌 왜 필요한가: `--version` 이 **없어서** 사용자가 자기 판을 알 방법이 없었다. 「0.4.0 이상이
+ *    필요합니다」 라는 안내를 **읽고도 확인할 수단이 없다**. 그리고 이 문제는 「모르는 플래그
+ *    거부」가 들어와도 **옛 판을 쓰는 사람에겐 안 온다** — 그 사람의 CLI 는 여전히 침묵한다.
+ *    그래서 둘은 독립이다(metapass-saas·briefick 실측).
+ */
+function packageVersion(): string | null {
+  try {
+    const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+    return (JSON.parse(raw) as { version?: string }).version ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function fail(msg: string): number {
