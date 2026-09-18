@@ -8,6 +8,7 @@
  * 키는 `~/.metapass-agent/key.json`에 영속 → **최초 1회만 등록, 이후 재사용**. `--url`/`--code`는
  * 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
  */
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AgentKey } from "./key.js";
@@ -37,6 +38,19 @@ interface Args {
   insecureNoToken: boolean;
   install: boolean;
   uninstallFlag: boolean;
+  /**
+   * 인식하지 못한 `-`/`--` 인자. **비어 있지 않으면 실행하지 않는다.**
+   *
+   * 🔴 종전에는 이것이 `rest` 로 떨어져 **두 자리 중 하나**에 앉았다(`out.cmd ??= rest[0]`):
+   * ```
+   * status --bogus   → rest[1] = sub 자리 → status 는 sub 를 안 본다 → **조용히 무시**
+   * --version        → rest[0] = cmd 자리 → 「알 수 없는 명령」 → 시끄럽게 죽음
+   * ```
+   * ⚠️ 앞쪽이 위험하다 — `up --install` 을 `--install` 없는 판(0.3.0)에서 돌리면 **그냥 `up`** 이
+   * 되고, 프록시는 떠서 «된 것처럼» 보이는데 **상주 등록만 빠진다.** 드러나는 시점이
+   * **재부팅 뒤**라 원인과 증상이 가장 멀다(metapass-saas 실측).
+   */
+  unknownFlags?: string[];
 }
 
 function parse(argv: string[]): Args {
@@ -56,6 +70,10 @@ function parse(argv: string[]): Args {
     else if (a === "--uninstall") out.uninstallFlag = true;
     else if (a === "--force") out.force = true;
     else if (a === "-h" || a === "--help") out.cmd = "help";
+    else if (a === "-v" || a === "--version") out.cmd = "version";
+    // ⚠️ `-` 로 시작하면 **위치 인자가 아니다.** rest 로 흘려보내면 명령/하위명령 자리에 앉아
+    //    조용히 무시된다 — 그 침묵이 이 변경이 없애려는 것이다.
+    else if (a.startsWith("-")) (out.unknownFlags ??= []).push(a);
     else rest.push(a);
   }
   out.cmd ??= rest[0];
@@ -335,10 +353,27 @@ const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 
   --key-backend <B>  키 저장 백엔드: file(기본) | keychain (env METAPASS_AGENT_KEY_BACKEND)
                      keychain = macOS Keychain(security) / Linux libsecret(secret-tool) — 평문 파일 없음.
                      기존 key.json이 있으면 최초 1회 자동 이관(이관 후 파일 삭제 권장)
-  --force            이미 등록됐어도 재등록`;
+  --force            이미 등록됐어도 재등록
+  -v, --version      이 CLI 의 판을 출력
+  -h, --help         이 도움말
+
+⚠️ 모르는 옵션은 **거부**한다(무시하지 않는다). 옛 판에서 새 플래그를 쓰면 조용히 빠져
+   «된 것처럼» 보이던 것을 막는다 — 예: 0.3.0 에서 "up --install" 은 그냥 "up" 이었다.`;
 
 export async function main(argv: string[]): Promise<number> {
   const args = parse(argv);
+
+  // 🔴 **모르는 옵션이면 아무것도 하지 않는다.** 종전엔 조용히 무시돼 «된 것처럼» 보였다.
+  //    ⚠️ 파괴적 변경이다 — 여분 플래그를 넘기던 스크립트가 깨진다. 그래도 이쪽이 맞다:
+  //    지금 그 스크립트는 **「되고 있다고 믿는」** 상태이고, 깨지는 쪽이 정보가 많다.
+  if (args.unknownFlags?.length) {
+    return fail(`알 수 없는 옵션: ${args.unknownFlags.join(" ")}\n\n${HELP}`);
+  }
+
+  if (args.cmd === "version") {
+    console.log(packageVersion());
+    return 0;
+  }
 
   if (!args.cmd || args.cmd === "help") {
     console.log(HELP);
@@ -661,6 +696,24 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   return fail(`알 수 없는 명령: ${args.cmd}\n\n${HELP}`);
+}
+
+/**
+ * 이 패키지의 판. `package.json` 을 **런타임에 읽는다**(빌드 시 박지 않는다).
+ *
+ * ⚠️ `src/`(tsx)와 `dist/`(빌드본)가 **둘 다 패키지 루트 한 칸 아래**라 같은 상대경로가 선다.
+ * 📌 왜 필요한가: `--version` 이 **없어서** 사용자가 자기 판을 알 방법이 없었다. 「0.4.0 이상이
+ *    필요합니다」 라는 안내를 **읽고도 확인할 수단이 없다**. 그리고 이 문제는 「모르는 플래그
+ *    거부」가 들어와도 **옛 판을 쓰는 사람에겐 안 온다** — 그 사람의 CLI 는 여전히 침묵한다.
+ *    그래서 둘은 독립이다(metapass-saas·briefick 실측).
+ */
+function packageVersion(): string {
+  try {
+    const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+    return (JSON.parse(raw) as { version?: string }).version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 function fail(msg: string): number {
