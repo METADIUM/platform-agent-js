@@ -5,6 +5,31 @@
 set -eu
 
 REPO="METADIUM/platform-agent-js"
+
+DEST="${METAPASS_AGENT_BIN_DIR:-$HOME/.metapass-agent/bin}"
+
+# 🔴 **갈아끼우기인지 최초 설치인지를 여기서 정한다.** 종전에는 이 감지가 77행(설치 직전)에
+#    있었고, 거부 문구는 그보다 앞이라 **이미 있는 파일을 못 봤다** — 갈아끼우다 멈춘 사람에게
+#    「아무것도 설치되지 않았습니다」라고 **거짓**을 말했다(briefick 이 s249 에서 겪은 경우다:
+#    0.4.x 가 깔린 상태에서 minisign 부재로 멈춤).
+# ⚠️ 방향이 특히 나쁘다 — 그 사람은 **「최신으로 올렸다」고 믿는데 옛 판이 계속 돈다.**
+#    「아무것도 안 됐다」는 **안심시키는 문장**이고, 여기서는 안심시키면 안 된다.
+HAD_OLD=0; [ -e "$DEST/metapass-agent" ] && HAD_OLD=1
+
+# 중단 시 **지금 상태**를 말한다 — 사용자마다 다르므로 한 자리에서만 만든다(사본 금지).
+# 🔴 **함수명은 ASCII 여야 한다.** 한글 이름은 `bash` 에서는 되지만 **POSIX `sh` 가 거부**한다
+#    (`설치상태: not a valid identifier`). 이 스크립트는 `curl … | sh` 로 실행되는 것이 정본이다.
+# ⚠️ 그리고 `bash -n` 은 **통과했다** — 검사기와 실행기가 달라 못 잡았다(실측).
+state_now() {   # 중단 시 «지금 상태» — 함수명은 **ASCII**여야 한다(아래 주석)
+  if [ "$HAD_OLD" = 1 ]; then
+    echo "  ⚠️ 판은 **안 바뀌었습니다** — \`$DEST/metapass-agent\` 에 **옛 판이 그대로** 있고,"
+    echo "     상주 데몬을 돌리고 있었다면 **옛 판으로 계속 돕니다.** 올린 것이 아닙니다."
+  else
+    echo "  ⚠️ **아무것도 설치되지 않았습니다** — \`$DEST/metapass-agent\` 는 만들어지지 않았습니다."
+    echo "     이 뒤에 그 명령이 \`command not found\` 로 죽으면 **경로 문제가 아니라 설치가 안 된 것**입니다."
+  fi
+}
+
 # 🟢 **실제 배포 공개키다**(placeholder 아님) — v0.4.0 이후 모든 릴리스의 `SHA256SUMS.minisig`
 #    가 이 키로 검증된다. 비밀키는 CI secret(`MINISIGN_SECRET_KEY`)에만 있다.
 # ⚠️ 종전에 여기 「첫 릴리스 전에 실제 공개키로 교체할 것」이 **세 판째 남아 있었다.**
@@ -22,18 +47,18 @@ else
   FETCH=curl
   VERSION="${METAPASS_AGENT_VERSION:-$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)}"
 fi
-[ -n "$VERSION" ] || { echo "오류: 최신 릴리스를 찾지 못했습니다 (비공개 레포는 gh CLI 로그인 필요: gh auth login)"; exit 1; }
+[ -n "$VERSION" ] || { echo "오류: 최신 릴리스를 찾지 못했습니다 (비공개 레포는 gh CLI 로그인 필요: gh auth login)"; state_now; exit 1; }
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET=darwin-arm64 ;;
   Darwin-x86_64) TARGET=darwin-x64 ;;
   Linux-x86_64) TARGET=linux-x64 ;;
   Linux-aarch64) TARGET=linux-arm64 ;;
-  *) echo "오류: 지원하지 않는 플랫폼 $(uname -s)-$(uname -m)"; exit 1 ;;
+  *) echo "오류: 지원하지 않는 플랫폼 $(uname -s)-$(uname -m)"; state_now; exit 1 ;;
 esac
 
 case "$MINISIGN_PUB" in
-  __REPLACE_*) echo "오류(fail-closed): 이 install.sh에 배포 공개키가 설정되지 않았습니다 — 서명 없는 채널로는 설치하지 않습니다"; exit 1 ;;
+  __REPLACE_*) echo "오류(fail-closed): 이 install.sh에 배포 공개키가 설정되지 않았습니다 — 서명 없는 채널로는 설치하지 않습니다"; state_now; exit 1 ;;
 esac
 # 🔴 **거부는 맞는데 하는 말이 반쪽이었다**(briefick, s249 실사용). 종전 문구는 «설치 방법» 만
 #    알려 주고 **왜 필요한지**를 안 말해서, 처음 보는 사람이 「의존성이 하나 더 있네」로 읽고
@@ -41,23 +66,21 @@ esac
 #    ⇒ 무엇을 위한 것인지 · 없이 설치하면 무엇을 잃는지를 같이 말한다.
 # 🔵 **거부 문구가 이 값을 쓰므로 여기서 먼저 정한다.** 아래로 두면 `set -eu` 에서
 #    `DEST: unbound variable` 로 죽어 **안내 대신 셸 오류**가 나간다(실측).
-DEST="${METAPASS_AGENT_BIN_DIR:-$HOME/.metapass-agent/bin}"
 
 command -v minisign >/dev/null || {
-  echo "오류(fail-closed): minisign이 없습니다. **아무것도 설치되지 않았습니다.**"
+  echo "오류(fail-closed): minisign이 없습니다."
   echo "  이 스크립트는 SHA256SUMS의 **서명**을 검증한 뒤에만 설치합니다 — minisign은 그 검증에 씁니다."
   echo "  건너뛰고 바이너리를 직접 받아 복사하면 **서명 없는 채널**이 됩니다(체크섬만으로는"
   echo "  배포물이 바뀌었는지 알 수 없습니다 — 체크섬 파일도 같이 바뀔 수 있습니다)."
   echo "  설치: brew install minisign  /  apt install minisign  /  dnf install minisign"
-  echo "  ⚠️ 지금 \`$DEST/metapass-agent\` 는 만들어지지 않았습니다 — 이 뒤에 그 명령이"
-  echo "     \`command not found\` 로 죽으면 **경로 문제가 아니라 설치가 안 된 것**입니다."
+  state_now
   exit 1; }
 
 BASE="https://github.com/$REPO/releases/download/$VERSION"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 fetch() {
   if [ "$FETCH" = gh ]; then gh release download "$VERSION" -R "$REPO" -p "$1" -O "$2" --clobber
-  else curl -fsSL "$BASE/$1" -o "$2" || { echo "오류: $1 다운로드 실패 — 비공개 레포면 gh CLI 설치·로그인 후 재실행"; exit 1; }
+  else curl -fsSL "$BASE/$1" -o "$2" || { echo "오류: $1 다운로드 실패 — 비공개 레포면 gh CLI 설치·로그인 후 재실행"; state_now; exit 1; }
   fi
 }
 echo "↓ $VERSION ($TARGET, via $FETCH)"
@@ -69,12 +92,9 @@ fetch "SHA256SUMS.minisig" "$TMP/SHA256SUMS.minisig"
 minisign -Vm "$TMP/SHA256SUMS" -P "$MINISIGN_PUB" -x "$TMP/SHA256SUMS.minisig" >/dev/null
 EXPECTED="$(grep " metapass-agent-$TARGET\$" "$TMP/SHA256SUMS" | cut -d' ' -f1)"
 ACTUAL="$(shasum -a 256 "$TMP/metapass-agent" 2>/dev/null | cut -d' ' -f1 || sha256sum "$TMP/metapass-agent" | cut -d' ' -f1)"
-[ "$EXPECTED" = "$ACTUAL" ] || { echo "오류(fail-closed): 체크섬 불일치 — **아무것도 설치되지 않았습니다.**"; exit 1; }
+[ "$EXPECTED" = "$ACTUAL" ] || { echo "오류(fail-closed): 체크섬 불일치"; state_now; exit 1; }
 
 mkdir -p "$DEST"
-# 🔵 갈아끼우는 경우인지 **덮어쓰기 전에** 기억한다 — 아래 경고는 최초 설치에는 안 나와야 한다.
-#    「놀라지 마라」인 경고를 놀랄 일 없는 사람에게 미리 주면 **다음에 진짜 났을 때 안 읽힌다**(briefick).
-HAD_OLD=0; [ -e "$DEST/metapass-agent" ] && HAD_OLD=1
 install -m 0755 "$TMP/metapass-agent" "$DEST/metapass-agent"
 echo "✅ 설치: $DEST/metapass-agent ($VERSION, 서명 검증됨)"
 if [ "$HAD_OLD" = 1 ]; then
