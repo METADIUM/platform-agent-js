@@ -759,7 +759,24 @@ export async function main(argv: string[]): Promise<number> {
  *    거부」가 들어와도 **옛 판을 쓰는 사람에겐 안 온다** — 그 사람의 CLI 는 여전히 침묵한다.
  *    그래서 둘은 독립이다(metapass-saas·briefick 실측).
  */
+/**
+ * 🔴 **SEA 단일 바이너리에는 읽을 `package.json` 이 없다.** 위 주석이 「걸릴 자리가 있다」고
+ *    예견한 그 분기가 실제로 걸렸다 — 릴리스 `v0.5.1` 의 바이너리에서 `--version` 이
+ *    exit 1 로 «판을 읽지 못했다» 를 냈다(New-Platform 실측).
+ *
+ * ⚠️ 그리고 그 자리가 **`--version` 이 가장 필요한 자리**다: npx 사용자는 명령에 박힌 핀으로
+ *    판을 이미 알지만, **설치형 사용자는 확인할 방법이 재설치뿐**이었다.
+ *
+ * ⇒ 빌드 때 판을 **번들에 박는다**(`scripts/build-sea.mjs` 의 esbuild `--define`).
+ *   - SEA 번들: `__AGENT_VERSION__` 이 문자열 리터럴로 치환돼 파일을 안 읽는다
+ *   - npm 빌드(tsc): 그 이름이 **없는 전역**이라 `typeof` 가 `"undefined"` — 던지지 않고
+ *     종전대로 `package.json` 을 읽는다. 두 경로가 서로를 안 건드린다
+ */
+declare const __AGENT_VERSION__: string | undefined;
+
 function packageVersion(): string | null {
+  // 빌드 때 박은 값이 있으면 그것이 답이다 — 파일이 없는 실행본도 판을 말할 수 있어야 한다.
+  if (typeof __AGENT_VERSION__ === "string" && __AGENT_VERSION__ !== "") return __AGENT_VERSION__;
   try {
     const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
     return (JSON.parse(raw) as { version?: string }).version ?? null;

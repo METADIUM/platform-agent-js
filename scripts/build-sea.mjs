@@ -25,8 +25,14 @@ function run(cmd, args, opts = {}) {
 
 // 1) 단일 CJS 번들 (SEA main은 CommonJS 단일 파일이어야 함)
 mkdirSync(OUT, { recursive: true });
+// 🔴 **판을 번들에 박는다.** SEA 에는 읽을 package.json 이 없어 `--version` 이 exit 1 로
+//    «판을 읽지 못했다» 를 냈다(v0.5.1 실측). npx 사용자는 명령의 핀으로 아는데 설치형
+//    사용자는 **재설치 말고는 확인할 방법이 없었다** — 거기가 `--version` 이 가장 필요한 자리다.
+// ⚠️ 여기 박는 값과 package.json 이 갈리면 바이너리가 **거짓 판**을 말한다. 아래 esbuild 는
+//    같은 `version` 변수를 쓰고, CI 는 빌드 뒤 `--version` 을 실제로 돌려 대조한다(release-binaries.yml).
 run("npx", ["esbuild", "src/cli.ts", "--bundle", "--platform=node", "--format=cjs",
   "--outfile=dist-bin/sea-bundle.cjs", "--define:import.meta.url=__sea_meta_url",
+  `--define:__AGENT_VERSION__=${JSON.stringify(version)}`,
   "--banner:js=const __sea_meta_url = require('url').pathToFileURL(__filename).href;"]);
 
 // 2) SEA blob (교차 주입 가능: useCodeCache/useSnapshot 비활성)

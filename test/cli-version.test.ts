@@ -29,6 +29,46 @@ import { main } from "../src/cli.js";
 
 const mockRead = vi.mocked(readFileSync);
 
+/**
+ * 🔴 **빌드 때 박은 판이 파일보다 먼저다** — SEA 단일 바이너리에는 읽을 `package.json` 이
+ *    없어서 `v0.5.1` 바이너리가 `--version` 에 exit 1 을 냈다(New-Platform 실측).
+ *    그 자리가 하필 `--version` 이 가장 필요한 곳이다: npx 사용자는 명령의 핀으로 알지만
+ *    **설치형 사용자는 재설치 말고 확인할 방법이 없었다.**
+ *
+ * ⚠️ 이 검사는 «파일을 못 읽는 상태»에서 돈다(`node:fs` 모킹). 그런데도 판을 말해야 한다 —
+ *    그게 SEA 의 조건이다. 박은 값이 무시되면 여기서 빨개진다.
+ * 📌 다만 이건 **선언 경로**만 잰다(전역이 있으면 쓰는가). 「빌드가 실제로 박는가」는
+ *    여기서 못 잰다 — 그건 `release-binaries.yml` 의 게이트가 바이너리를 **돌려서** 잰다.
+ */
+describe("빌드 때 박은 판", () => {
+  let out: string[];
+  beforeEach(() => {
+    vi.clearAllMocks();
+    out = [];
+    vi.spyOn(console, "log").mockImplementation((m?: unknown) => { out.push(String(m)); });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete (globalThis as Record<string, unknown>).__AGENT_VERSION__;
+  });
+
+  it("파일을 못 읽어도 박은 판을 말한다", async () => {
+    mockRead.mockImplementation(() => { throw new Error("SEA: no package.json"); });
+    (globalThis as Record<string, unknown>).__AGENT_VERSION__ = "9.9.9";
+    const code = await main(["--version"]);
+    expect(code).toBe(0);
+    expect(out.join("\n")).toContain("9.9.9");
+  });
+
+  it("빈 문자열은 박힌 것으로 치지 않는다 — 파일로 내려간다", async () => {
+    mockRead.mockImplementation(() => { throw new Error("SEA: no package.json"); });
+    (globalThis as Record<string, unknown>).__AGENT_VERSION__ = "";
+    const code = await main(["--version"]);
+    expect(code).toBe(1);   // 박힌 것도 없고 파일도 못 읽으면 «못 읽었다»가 맞다
+  });
+});
+
 describe("--version 은 못 읽으면 못 읽었다고 말한다", () => {
   let out: string[];
   let err: string[];

@@ -17,6 +17,23 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node scripts/build-sea.mjs --all
+      # 🔴 **바이너리가 자기 판을 말하는지 여기서 잠근다.** v0.5.1 바이너리는 `--version` 이
+      #    exit 1 로 «판을 읽지 못했다» 를 냈는데(SEA 에는 package.json 이 없다) 릴리스가
+      #    그대로 나갔다 — 아무도 **자산을 받아 돌려 보지 않았기** 때문이다.
+      # ⚠️ 파이프·명령치환으로 받지 않는다: 바이너리가 죽으면 종료코드가 삼켜지고
+      #    빈 문자열 비교가 «다르다» 로만 보여 **원인이 안 보인다**.
+      - name: Gate — 바이너리가 말하는 판 == package.json == 태그
+        run: |
+          set -euo pipefail
+          expected=$(node -p "require('./package.json').version")
+          tag="${{ github.event.release.tag_name }}"
+          test "$tag" = "v$expected" || {
+            echo "🔴 태그($tag)와 package.json(v$expected)이 다르다 — 잘못된 커밋에 태그가 붙었다"; exit 1; }
+          ./dist-bin/metapass-agent-darwin-arm64 --version > /tmp/sea-version.txt
+          actual=$(cat /tmp/sea-version.txt)
+          test "$actual" = "$expected" || {
+            echo "🔴 바이너리가 말하는 판($actual)이 package.json($expected)과 다르다"; exit 1; }
+          echo "🟢 판 일치: $tag == v$actual"
       - name: Sign SHA256SUMS (minisign — 릴리스 게이트)
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
