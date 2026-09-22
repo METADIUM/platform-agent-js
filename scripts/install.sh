@@ -39,12 +39,18 @@ esac
 #    알려 주고 **왜 필요한지**를 안 말해서, 처음 보는 사람이 「의존성이 하나 더 있네」로 읽고
 #    **서명 검증을 건너뛰는 우회로**(바이너리를 직접 받아 복사)를 찾을 수 있었다.
 #    ⇒ 무엇을 위한 것인지 · 없이 설치하면 무엇을 잃는지를 같이 말한다.
+# 🔵 **거부 문구가 이 값을 쓰므로 여기서 먼저 정한다.** 아래로 두면 `set -eu` 에서
+#    `DEST: unbound variable` 로 죽어 **안내 대신 셸 오류**가 나간다(실측).
+DEST="${METAPASS_AGENT_BIN_DIR:-$HOME/.metapass-agent/bin}"
+
 command -v minisign >/dev/null || {
-  echo "오류(fail-closed): minisign이 없습니다."
+  echo "오류(fail-closed): minisign이 없습니다. **아무것도 설치되지 않았습니다.**"
   echo "  이 스크립트는 SHA256SUMS의 **서명**을 검증한 뒤에만 설치합니다 — minisign은 그 검증에 씁니다."
   echo "  건너뛰고 바이너리를 직접 받아 복사하면 **서명 없는 채널**이 됩니다(체크섬만으로는"
   echo "  배포물이 바뀌었는지 알 수 없습니다 — 체크섬 파일도 같이 바뀔 수 있습니다)."
   echo "  설치: brew install minisign  /  apt install minisign  /  dnf install minisign"
+  echo "  ⚠️ 지금 \`$DEST/metapass-agent\` 는 만들어지지 않았습니다 — 이 뒤에 그 명령이"
+  echo "     \`command not found\` 로 죽으면 **경로 문제가 아니라 설치가 안 된 것**입니다."
   exit 1; }
 
 BASE="https://github.com/$REPO/releases/download/$VERSION"
@@ -63,9 +69,8 @@ fetch "SHA256SUMS.minisig" "$TMP/SHA256SUMS.minisig"
 minisign -Vm "$TMP/SHA256SUMS" -P "$MINISIGN_PUB" -x "$TMP/SHA256SUMS.minisig" >/dev/null
 EXPECTED="$(grep " metapass-agent-$TARGET\$" "$TMP/SHA256SUMS" | cut -d' ' -f1)"
 ACTUAL="$(shasum -a 256 "$TMP/metapass-agent" 2>/dev/null | cut -d' ' -f1 || sha256sum "$TMP/metapass-agent" | cut -d' ' -f1)"
-[ "$EXPECTED" = "$ACTUAL" ] || { echo "오류(fail-closed): 체크섬 불일치"; exit 1; }
+[ "$EXPECTED" = "$ACTUAL" ] || { echo "오류(fail-closed): 체크섬 불일치 — **아무것도 설치되지 않았습니다.**"; exit 1; }
 
-DEST="${METAPASS_AGENT_BIN_DIR:-$HOME/.metapass-agent/bin}"
 mkdir -p "$DEST"
 # 🔵 갈아끼우는 경우인지 **덮어쓰기 전에** 기억한다 — 아래 경고는 최초 설치에는 안 나와야 한다.
 #    「놀라지 마라」인 경고를 놀랄 일 없는 사람에게 미리 주면 **다음에 진짜 났을 때 안 읽힌다**(briefick).
