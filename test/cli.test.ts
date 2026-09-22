@@ -330,3 +330,78 @@ describe("판 주입은 빌드와의 텍스트 계약이다", () => {
     expect(build).toContain("--define:__AGENT_VERSION__=");
   });
 });
+
+/**
+ * 🔴 **두 레포가 같은 사실 위에 문구를 얹고 있다.**
+ *
+ * ```
+ * 이 레포   `upgrade` 실행 출력 · --help   "판은 안 바뀐다 — install.sh 를 다시 돌려라"
+ * briefick  화면 안내                       "up --install 은 유닛만 건드려 파일을 안 바꿉니다"
+ * ```
+ *
+ * 둘 다 있어야 한다 — 하나는 **친 사람**에게, 하나는 **치기 전 사람**에게 간다. 그런데 둘은
+ * **갈릴 수 있는 사본**이고, 갈리는 계기는 문구가 아니라 **동작이 바뀌는 것**이다:
+ * 누가 `installUnit()` 에 바이너리 복사를 넣으면 **양쪽 문구가 동시에 거짓**이 되는데,
+ * 아무도 안 본다(문구는 그대로니까).
+ *
+ * ⇒ 사본을 줄이는 대신 **둘이 기대는 사실 하나를 여기서 잠근다.** 이 검사가 빨개지면
+ *   양쪽 문구를 같이 고쳐야 한다는 신호다.
+ * 📌 오늘의 말로: 사본 둘을 「한 문장」으로 합칠 수 없을 때는, 둘이 딛고 선 **바닥**을 잠근다.
+ */
+describe("`upgrade` 는 유닛만 만진다 — 두 레포 문구가 딛고 선 사실", () => {
+  /** 🔴 **주석을 떼고 본다.** 안 떼면 이 규칙을 `install.ts` 에 **문서화하는 순간** 빨개진다
+   *  (`#5` 에서 이미 밟은 함정이 이 파일에 다시 있다 — briefick 지적). */
+  const src = readFileSync(new URL("../src/install.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+
+  /**
+   * 🔴 **개수를 세면 교환에 뚫린다** — 앞 판은 `writeFileSync` 가 둘인지만 봤다.
+   *    하나를 지우고 `writeFileSync(destBin, readFileSync(srcBin))` 를 더하면 **둘 그대로**다.
+   *    막으려던 바로 그것이 통과한다(briefick). 이 팀이 `#42` 에서 세운 규칙 그대로다:
+   *    **수가 아니라 이름**을 본다.
+   */
+  it("쓰는 대상이 유닛 파일 둘뿐이다 — 이름으로 본다", () => {
+    const targets = [...src.matchAll(/writeFileSync\(\s*([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
+    expect(new Set(targets)).toEqual(new Set(["plistPath", "unitPath"]));
+  });
+
+  /**
+   * 🔴 **금지 목록은 내가 아는 방법만 막는다** — 처음엔 `copyFileSync` 를 막고
+   *    `copyFile`(`node:fs/promises`) 은 못 막았다. 그래서 **허용 집합**으로 뒤집었는데,
+   *    그 첫 판도 뚫렸다(briefick 실측, 둘 다 78 통과):
+   *
+   * ```ts
+   * import { copyFileSync } from "fs";        // 접두 없음 — 유효하고 오히려 더 흔한 표기
+   * import { copyFileSync } from "node:fs";   // 두 번째 줄 — .match 는 첫 일치만 본다
+   * ```
+   *
+   * 📌 이름 집합은 맞았는데 **어느 이름 집합인지가 한 줄에 매여** 있었다. 개수 → 이름으로
+   *    옮긴 것의 **한 칸 위**다. ⇒ `matchAll` 로 **fs 표면 전체**(`fs` · `node:fs` ·
+   *    `node:fs/promises` · `fs/promises`)를 모아 합집합으로 본다.
+   * 🟢 네임스페이스 임포트(`import * as fs`)·`require` 는 중괄호가 없어 **아래가 잡지 못하지만**,
+   *    그때는 매치가 0건이라 첫 단언에서 멈춘다(fail-closed).
+   */
+  it("fs 표면 전체에서 가져오는 것이 정확히 넷이다", () => {
+    const imports = [...src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"(?:node:)?fs(?:\/promises)?"/g)];
+    expect(imports.length).toBeGreaterThan(0);
+    const names = imports.flatMap((m) => m[1].split(",").map((x) => x.trim()).filter(Boolean));
+    expect(new Set(names)).toEqual(new Set(["existsSync", "mkdirSync", "rmSync", "writeFileSync"]));
+  });
+
+  /** ⚠️ 위가 `fs/promises` 도 함께 세므로 **별도 금지 검사는 흡수됐다** — 같은 사실의 사본을
+   *  둘 두지 않는다(briefick). 중괄호 없는 꼴만 따로 막는다. */
+  it("네임스페이스 임포트·require 로 우회하지 않는다", () => {
+    expect(src).not.toMatch(/import\s+\*\s+as\s+\w+\s+from\s*"(?:node:)?fs/);
+    expect(src).not.toMatch(/require\(\s*"(?:node:)?fs/);
+  });
+
+  /**
+   * ⚠️ 위 둘로도 **`execFileSync("cp", …)`** 는 안 막힌다 — `execFileSync` 는 launchctl 때문에
+   *    이미 들어와 있다. 그래서 **실행하는 명령 이름**도 허용 집합으로 잠근다.
+   */
+  it("외부로 실행하는 명령이 셋뿐이다", () => {
+    const cmds = [...src.matchAll(/(?:run|runQuiet|execFileSync)\(\s*"([^"]+)"/g)].map((m) => m[1]);
+    expect(new Set(cmds)).toEqual(new Set(["launchctl", "systemctl", "loginctl"]));
+  });
+});
