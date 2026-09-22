@@ -182,6 +182,26 @@ PoP는 등록할 **did:jwk 개인키로 서명한 ES256 JWT**(aud 스코핑 + ia
 - `METAPASS_DELEGATION_ADMIN_KEY` = sso.cplabs.io 배포 시 설정한 `PLATFORM_SECURITY_API_KEY`
   (New-Platform이 "발급"하는 값이 아니라 그 검증자 인스턴스의 env 비밀).
 
+## Release signing key
+
+Release assets are verified against this minisign public key. `install.sh` refuses to install
+without a successful signature check.
+
+```
+RWT8kUm/J8uyqoOFON5wRNBUCOUtn4+nX0YeyYMItdo2J6iVNYd4uUAX
+```
+
+The same key is in `minisign.pub` in this repository. Verify a release yourself with:
+
+```sh
+minisign -Vm SHA256SUMS -P 'RWT8kUm/J8uyqoOFON5wRNBUCOUtn4+nX0YeyYMItdo2J6iVNYd4uUAX' \
+         -x SHA256SUMS.minisig
+```
+
+Checking the SHA256 sums alone is not enough: an attacker who can replace an asset can replace
+the sums file with it. The signature is what ties the sums to the publisher, so the key has to
+come from somewhere other than the release you are checking — that is why it is published here.
+
 ## 와이어 포맷 패리티
 
 did:jwk(정준 JWK 순서), SD-JWT VC 제시(`core = issuerJwt~disc~…~`, `sd_hash = base64url(SHA-256(ASCII(core)))`),

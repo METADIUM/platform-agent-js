@@ -5,8 +5,13 @@
 set -eu
 
 REPO="METADIUM/platform-agent-js"
-# ⚠ 릴리스 게이트: 첫 릴리스 전에 minisign 키쌍을 생성해 아래를 실제 공개키로 교체할 것.
-#   생성: minisign -G  → 비밀키는 CI secret(MINISIGN_SECRET_KEY), 공개키는 여기+문서에 게시.
+# 🟢 **실제 배포 공개키다**(placeholder 아님) — v0.4.0 이후 모든 릴리스의 `SHA256SUMS.minisig`
+#    가 이 키로 검증된다. 비밀키는 CI secret(`MINISIGN_SECRET_KEY`)에만 있다.
+# ⚠️ 종전에 여기 「첫 릴리스 전에 실제 공개키로 교체할 것」이 **세 판째 남아 있었다.**
+#    자기 완료를 지시하는 문장이 완료 뒤에도 남으면, 읽는 사람이 **「검증이 아직 가짜」로 오독**하고
+#    fail-closed 를 우회할 **명분**을 얻는다(metapass-saas 지적).
+# 📌 이 키는 `minisign.pub` · `README.md` 에도 게시된다 — **신뢰의 뿌리는 검증 대상 밖**에 있어야
+#    한다. 릴리스만 받은 사람이 대조할 곳이 릴리스 안뿐이면 자산 손상만 막고 위조는 못 막는다.
 MINISIGN_PUB="RWT8kUm/J8uyqoOFON5wRNBUCOUtn4+nX0YeyYMItdo2J6iVNYd4uUAX"
 
 # 비공개 레포 지원: gh CLI(인증)가 있으면 그것으로, 없으면 익명 curl(공개 레포 전용).

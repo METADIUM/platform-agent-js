@@ -367,20 +367,33 @@ describe("`upgrade` 는 유닛만 만진다 — 두 레포 문구가 딛고 선 
   });
 
   /**
-   * 🔴 **금지 목록은 내가 아는 방법만 막는다** — 앞 판은 `copyFileSync` 를 막고
-   *    `copyFile`(`node:fs/promises`) 은 못 막았다. 한 글자 차이고 `async` 안이라
-   *    비동기 쪽이 오히려 자연스럽다(briefick). ⇒ **허용 집합**으로 뒤집는다:
-   *    새 fs API 를 쓰려면 **임포트를 늘려야** 하고, 그 순간 여기서 빨개진다.
+   * 🔴 **금지 목록은 내가 아는 방법만 막는다** — 처음엔 `copyFileSync` 를 막고
+   *    `copyFile`(`node:fs/promises`) 은 못 막았다. 그래서 **허용 집합**으로 뒤집었는데,
+   *    그 첫 판도 뚫렸다(briefick 실측, 둘 다 78 통과):
+   *
+   * ```ts
+   * import { copyFileSync } from "fs";        // 접두 없음 — 유효하고 오히려 더 흔한 표기
+   * import { copyFileSync } from "node:fs";   // 두 번째 줄 — .match 는 첫 일치만 본다
+   * ```
+   *
+   * 📌 이름 집합은 맞았는데 **어느 이름 집합인지가 한 줄에 매여** 있었다. 개수 → 이름으로
+   *    옮긴 것의 **한 칸 위**다. ⇒ `matchAll` 로 **fs 표면 전체**(`fs` · `node:fs` ·
+   *    `node:fs/promises` · `fs/promises`)를 모아 합집합으로 본다.
+   * 🟢 네임스페이스 임포트(`import * as fs`)·`require` 는 중괄호가 없어 **아래가 잡지 못하지만**,
+   *    그때는 매치가 0건이라 첫 단언에서 멈춘다(fail-closed).
    */
-  it("node:fs 에서 가져오는 것이 정확히 넷이다", () => {
-    const m = src.match(/import\s*\{([^}]*)\}\s*from\s*"node:fs"/);
-    expect(m).not.toBeNull();
-    const names = m![1].split(",").map((x) => x.trim()).filter(Boolean);
+  it("fs 표면 전체에서 가져오는 것이 정확히 넷이다", () => {
+    const imports = [...src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"(?:node:)?fs(?:\/promises)?"/g)];
+    expect(imports.length).toBeGreaterThan(0);
+    const names = imports.flatMap((m) => m[1].split(",").map((x) => x.trim()).filter(Boolean));
     expect(new Set(names)).toEqual(new Set(["existsSync", "mkdirSync", "rmSync", "writeFileSync"]));
   });
 
-  it("node:fs/promises 를 안 쓴다 — 비동기 복사가 들어올 문", () => {
-    expect(src).not.toContain('from "node:fs/promises"');
+  /** ⚠️ 위가 `fs/promises` 도 함께 세므로 **별도 금지 검사는 흡수됐다** — 같은 사실의 사본을
+   *  둘 두지 않는다(briefick). 중괄호 없는 꼴만 따로 막는다. */
+  it("네임스페이스 임포트·require 로 우회하지 않는다", () => {
+    expect(src).not.toMatch(/import\s+\*\s+as\s+\w+\s+from\s*"(?:node:)?fs/);
+    expect(src).not.toMatch(/require\(\s*"(?:node:)?fs/);
   });
 
   /**
