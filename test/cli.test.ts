@@ -472,3 +472,33 @@ describe("판 판별 문구는 소비처와의 계약이다", () => {
     expect(err.join("\n")).toContain(모르는명령);
   });
 });
+
+/**
+ * 🔴 **출력만 잠그면 「도달 못 하는 문자열」이 남는다.**
+ *
+ * 배포된 `v0.5.2` 바이너리에 `@^0.4.0` 이 **1회 남아 있습니다**(metapass-saas 가 `strings` 로
+ * 계수). 그 판은 판을 박아 뒀으므로 그 메시지 경로로 안 떨어지고, 실제로 `--version`·`--help`·
+ * 모르는 명령 **세 경로에서 0회**입니다. ⇒ **존재하지만 도달 못 한다**이지 «없다»가 아닙니다.
+ *
+ * ⚠️ 그러면 출력 검사만으로는 *"고쳤는데 다음 판에도 들어 있다"* 가 됩니다 — 도달 경로가
+ * 막혀 있는 동안 문자열이 조용히 따라갑니다. ⇒ **소스 리터럴도 본다.**
+ *
+ * 📌 주석은 뗀다 — 이 규칙의 **내력을 적는 것**까지 막으면 안 된다(`#8` 에서 같은 함정을 밟았다).
+ */
+describe("사용자에게 나가는 문자열에 범위 스펙이 없다", () => {
+  const 주석뗀소스 = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+
+  it("cli.ts 의 문자열에 `@^`·`@~` 가 없다", () => {
+    expect(주석뗀소스).not.toMatch(/@[\^~]\d/);
+  });
+
+  it("도움말에도 없다", async () => {
+    const out: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((m?: unknown) => { out.push(String(m)); });
+    await main(["--help"]);
+    spy.mockRestore();
+    expect(out.join("\n")).not.toMatch(/@[\^~]\d/);
+  });
+});
