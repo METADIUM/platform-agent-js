@@ -330,3 +330,36 @@ describe("판 주입은 빌드와의 텍스트 계약이다", () => {
     expect(build).toContain("--define:__AGENT_VERSION__=");
   });
 });
+
+/**
+ * 🔴 **두 레포가 같은 사실 위에 문구를 얹고 있다.**
+ *
+ * ```
+ * 이 레포   `upgrade` 실행 출력 · --help   "판은 안 바뀐다 — install.sh 를 다시 돌려라"
+ * briefick  화면 안내                       "up --install 은 유닛만 건드려 파일을 안 바꿉니다"
+ * ```
+ *
+ * 둘 다 있어야 한다 — 하나는 **친 사람**에게, 하나는 **치기 전 사람**에게 간다. 그런데 둘은
+ * **갈릴 수 있는 사본**이고, 갈리는 계기는 문구가 아니라 **동작이 바뀌는 것**이다:
+ * 누가 `installUnit()` 에 바이너리 복사를 넣으면 **양쪽 문구가 동시에 거짓**이 되는데,
+ * 아무도 안 본다(문구는 그대로니까).
+ *
+ * ⇒ 사본을 줄이는 대신 **둘이 기대는 사실 하나를 여기서 잠근다.** 이 검사가 빨개지면
+ *   양쪽 문구를 같이 고쳐야 한다는 신호다.
+ * 📌 오늘의 말로: 사본 둘을 「한 문장」으로 합칠 수 없을 때는, 둘이 딛고 선 **바닥**을 잠근다.
+ */
+describe("`upgrade` 는 유닛만 만진다 — 두 레포 문구가 딛고 선 사실", () => {
+  const src = readFileSync(new URL("../src/install.ts", import.meta.url), "utf8");
+
+  it("바이너리를 복사·이동하는 호출이 없다", () => {
+    for (const call of ["copyFileSync", "cpSync", "renameSync", "createWriteStream"]) {
+      expect(src).not.toContain(call);
+    }
+  });
+
+  it("쓰는 것은 유닛 파일뿐이다", () => {
+    // writeFileSync 는 plist/systemd 유닛에만 쓰인다. 늘어나면 무엇을 쓰는지 다시 봐야 한다.
+    const writes = src.match(/writeFileSync\(/g) ?? [];
+    expect(writes.length).toBe(2);   // launchd plist · systemd unit
+  });
+});

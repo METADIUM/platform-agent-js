@@ -32,6 +32,18 @@ jobs:
           set -euo pipefail
           expected=$(node -p "require('./package.json').version")
           tag="${{ github.event.release.tag_name }}"
+
+          # 🔴 **0.5.0 은 릴리스하지 않는다.** npm 에서 deprecate 된 결함 판이다 —
+          #    모르는 옵션 오류에 **값이 그대로 노출**되고(`--code=<코드>` · `--url=<주소>`),
+          #    `--port=8787` 같은 정상 등호형이 거부되며, `up` 이 `--port` 를 무시한다.
+          # ⚠️ 지금 v0.5.0 릴리스가 **없는 것은 우연**이었고, 그 우연이 설치형 사용자를
+          #    막아 주고 있었다(briefick 지적). 우연을 규칙으로 바꾼다 —
+          #    소급해서 자르면 **설치형 사용자가 값 새는 판을 받게 된다.**
+          case "$expected" in
+            0.5.0) echo "🔴 0.5.0 은 릴리스 금지 — npm 에서 deprecate 된 결함 판이다."
+                   echo "   값 노출·등호형 거부·up --port 무시. 0.5.1 이상을 쓸 것."
+                   exit 1 ;;
+          esac
           test "$tag" = "v$expected" || {
             echo "🔴 태그($tag)와 package.json(v$expected)이 다르다 — 잘못된 커밋에 태그가 붙었다"; exit 1; }
           # 🔴 **레포 안에서 돌리면 안 된다.** `dist-bin/../package.json` 이 실재해서
