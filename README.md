@@ -1,153 +1,176 @@
 # @metadium-did/platform-agent-js
 
-AI 에이전트(예: Claude Code)가 **위임 VC로 서비스에 인증**하기 위한 Node/TypeScript **홀더 클라이언트 + CLI**.
-정적 API 키를 **스코프드·기한부·철회가능 위임**으로 대체한다([[samples/docs/22]] 시나리오 #8).
+A Node/TypeScript **holder client and CLI** that lets an AI agent (Claude Code, for example)
+**authenticate to a service with a delegation VC**. It replaces static API keys with
+**scoped, time-bound, revocable delegation** (scenario #8 in `samples/docs/22`).
 
-- **did:jwk 키**(ES256/P-256) 생성·보관
-- **PoP JWT**(소유 증명) — 등록/회수/세션 교환
-- **SD-JWT VC 제시 + KB-JWT**(홀더 바인딩) — 위임 VP 생성
-- **Briefick 위임 인증 계약**(등록 → 회수 → 세션 교환) 클라이언트
-- **bearer 자동 갱신** — 짧은 TTL 세션 토큰을 만료 전 재교환(MCP 고정 헤더 대응)
+- **did:jwk keys** (ES256 / P-256) — generation and storage
+- **PoP JWTs** (proof of possession) — registration, retrieval, session exchange
+- **SD-JWT VC presentation + KB-JWT** (holder binding) — builds the delegation VP
+- Client for the **Briefick delegated-authentication contract** (register → retrieve → exchange)
+- **Automatic bearer refresh** — short-lived session tokens are re-exchanged before they expire,
+  so a client that only supports a fixed header keeps working
 
-> **왜 Node에 암호가 있나**: 에이전트는 위임 VC의 **홀더**라 자기 개인키로 KB-JWT/PoP를 **로컬 서명**해야
-> 한다(원격 위임 시 홀더 바인딩이 깨짐). 검증자(RP)와 달리 홀더 암호는 오프로드할 수 없어, 에이전트가 도는
-> 런타임(Node/MCP)에 있어야 한다. **홀더 제시 경로만·ES256 전용**으로 표면을 최소화했고, 와이어 포맷은
-> `platform-java`와 크로스검증된다(아래).
+> **Why cryptography lives in Node here.** The agent is the **holder** of the delegation VC, so it
+> has to sign KB-JWTs and PoPs **locally with its own private key** — delegating that signing to a
+> remote service would break holder binding. Unlike a verifier (RP), holder cryptography cannot be
+> offloaded, so it has to run where the agent runs (Node / MCP). The surface is kept small on
+> purpose: **holder presentation path only, ES256 only**, and the wire format is cross-checked
+> against `platform-java` (see below).
 
-## CLI (레포 clone 없이 npx 한 줄)
+## CLI (one `npx` line, no clone needed)
 
 ```bash
-# 등록 (최초 1회 — Briefick /publish 페어링 코드)
+# Register (once — pairing code from Briefick /publish)
 npx @metadium-did/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
 
-npx @metadium-did/platform-agent-js did                        # 이 에이전트 did:jwk 출력
-npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세션 bearer 1회 발급(stdout)
-npx @metadium-did/platform-agent-js credentials clear --url <BRIEFICK_URL>  # 캐시된 위임 VC 삭제(철회 후 재발급 대기 전환)
+npx @metadium-did/platform-agent-js did                                     # print this agent's did:jwk
+npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>            # issue one session bearer to stdout
+npx @metadium-did/platform-agent-js credentials clear --url <BRIEFICK_URL>  # drop the cached delegation VC
 ```
 
-**서버-로컬 상태 불일치 복구(0.2.4)** — RP가 등록을 회수했거나 사용자가 위임을 철회한 뒤에도 CLI가
-원인 있는 안내로 복구를 돕는다: ① `register`는 `--code`가 주어지면 로컬 "이미 등록됨" 기록과 무관하게
-서버에 등록(회수 후 재등록) ② 세션 401은 "새 페어링 코드로 `register --force`" 안내로 실패
-③ 세션이 위임 무효 사유로 거부되면 **캐시를 자동 폐기하고 지갑 재발급 승인 대기로 전환** 후 1회 재시도
-④ 세션 pending 타임아웃 시 `credentials clear` 안내.
+**Recovering from server/local state drift (0.2.4).** After an RP revokes a registration, or the
+user revokes the delegation, the CLI guides recovery instead of failing opaquely:
 
-**만료 요청 구분(0.2.5)** — 재발급 대기 중 요청이 만료되면(RP `status:"expired"` 또는
-`lastRequest.expiresAt` 경과, 하위호환) "승인 대기" 대신 **"요청이 만료됐습니다 — /publish에서 위임을
-다시 발급하세요"** 를 표시한다(대기 중 만료로 전환되는 순간도 감지). 401 안내에는 RP가 내려주는
-서버 사유(`error`)를 함께 표기한다.
+1. `register` with `--code` registers against the server regardless of a local "already registered"
+   record, so re-registration after a revocation works.
+2. A 401 on session exchange fails with guidance to run `register --force` with a fresh pairing code.
+3. If a session is refused because the delegation is no longer valid, the cached credential is
+   **discarded automatically**, the client switches to waiting for wallet re-approval, and retries once.
+4. A pending-session timeout points at `credentials clear`.
 
-`--url`/`--code`는 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
+**Telling expiry apart from waiting (0.2.5).** If a request expires while re-issuance is pending —
+either the RP reports `status: "expired"` or `lastRequest.expiresAt` has passed (kept for backward
+compatibility) — the CLI says **"the request expired; issue the delegation again from /publish"**
+rather than "waiting for approval". The transition is detected even if it happens mid-wait. The 401
+message also carries the server's own reason (`error`) when the RP sends one.
 
-`did`/`register`/`proxy`는 에이전트 **지문**(sha256(did:jwk) hex 앞 10자리)을 함께 출력한다 — 모든
-did:jwk는 앞자리가 같아 육안 구분이 안 되므로, Briefick `/publish`가 표시하는 지문과 1:1 대조해
-**어느 에이전트로 발급하는지** 확인한다. 위임 회수 대기 중에는 RP의 세분화 신호로 안내를 분기한다:
-`no_request`(이 에이전트로 발급된 위임 없음 — /publish에서 지문 확인) / `pending`+`lastRequest`(요청
-있음 — 지갑 승인·전달 대기, 타임아웃 시 지갑 callback 전달 실패 의심 안내).
+`--url` and `--code` can also be supplied as `BRIEFICK_URL` and `PAIRING_CODE`.
 
-**키 영속(최초 1회만 등록, 이후 재사용)** — 키는 `~/.metapass-agent/key.json`(파일 0600, 디렉터리 0700)에
-저장된다. 재실행 시 같은 did:jwk를 재사용하므로 **매번 새 에이전트로 등록되지 않는다.** `register`는 이미 등록된
-URL이면 **자동으로 재등록을 건너뛴다**(다시 하려면 `--force`). 경로 변경: `--key-file <PATH>` 또는
-`METAPASS_AGENT_KEY_FILE`. 개인키는 이 저장소에만 있고 네트워크로 나가지 않는다.
+`did`, `register` and `proxy` also print the agent's **fingerprint** (first 10 hex characters of
+`sha256(did:jwk)`). Every did:jwk starts with the same prefix, so they cannot be told apart by eye;
+compare the fingerprint with the one Briefick shows on `/publish` to confirm **which agent** a
+delegation is being issued to. While a delegation is being retrieved, the RP's finer-grained signals
+select the guidance: `no_request` (no delegation was issued to this agent — check the fingerprint on
+`/publish`) or `pending` with `lastRequest` (a request exists and is waiting for wallet approval and
+delivery; on timeout, suspect that the wallet callback failed to arrive).
 
-**키 저장 보안** — 로드 시 파일 권한을 검사해 소유자 외 접근 가능(0600 아님)이면 ssh처럼 **거부**한다
-(`chmod 600` 안내). 평문 파일을 원치 않으면 **OS 키체인 백엔드**를 쓴다:
+**Key persistence (register once, reuse afterwards).** The key is stored in
+`~/.metapass-agent/key.json` (file mode 0600, directory 0700). Re-running reuses the same did:jwk,
+so **the agent is not re-registered as a new one every time**. `register` **skips re-registration
+automatically** for a URL that is already registered — use `--force` to do it anyway. Change the
+path with `--key-file <PATH>` or `METAPASS_AGENT_KEY_FILE`. The private key stays in that store and
+is never sent over the network.
+
+**Key storage security.** On load, file permissions are checked, and anything readable beyond the
+owner (not 0600) is **refused**, the way ssh does, with a `chmod 600` hint. If you would rather not
+have a plaintext file, use an **OS keychain backend**:
 
 ```bash
-npx @metadium-did/platform-agent-js did --key-backend keychain   # 또는 env METAPASS_AGENT_KEY_BACKEND=keychain
+npx @metadium-did/platform-agent-js did --key-backend keychain   # or METAPASS_AGENT_KEY_BACKEND=keychain
 ```
 
-macOS는 Keychain(`security`), Linux는 libsecret(`secret-tool`)에 저장하며 평문 파일이 남지 않는다.
-기존 `key.json`이 있으면 최초 1회 자동으로 키체인에 이관한다(이관 후 파일 삭제 권장). 키가 유출돼도
-에이전트가 얻는 것은 위임된 scope 안의 짧은 TTL 세션뿐이고, 지갑에서 위임을 철회하면 즉시 무효다 —
-위임 발급 시 scope·기한을 최소로 잡는 것이 가장 효과적인 방어다.
+This stores the key in the macOS Keychain (`security`) or in libsecret on Linux (`secret-tool`), and
+leaves no plaintext file behind. An existing `key.json` is migrated into the keychain once,
+automatically; deleting the file afterwards is recommended. Even if the key leaks, what the holder
+of it gets is a short-lived session within the delegated scope, and revoking the delegation from the
+wallet invalidates it immediately — keeping scope and lifetime small at issuance time is the most
+effective defence.
 
-## 로컬 프록시 모드 — Claude Code 연동 (방식 b)
+## Local proxy mode — using this with Claude Code
 
-Claude Code(MCP 클라이언트)는 **고정 Authorization 헤더**만 지원하는데 위임 bearer는 짧은 TTL로 갱신된다.
-로컬 프록시를 띄우면 "고정 헤더 → 최신 bearer 주입"으로 궁합을 맞춘다.
+Claude Code, as an MCP client, supports only a **fixed `Authorization` header**, while a delegation
+bearer is short-lived and refreshed. A local proxy bridges the two: the fixed header goes to the
+proxy, and the proxy injects the current bearer.
 
 ```text
-Claude Code ──(고정 헤더, localhost)──▶ 프록시 ──(최신 bearer 주입)──▶ https://…/api/mcp
+Claude Code ──(fixed header, localhost)──▶ proxy ──(current bearer)──▶ https://…/api/mcp
 ```
 
 ```bash
-# 1) 프록시 실행(포그라운드) — 저장된 위임 VC로 세션 bearer 자동 갱신·주입
+# 1) Run the proxy in the foreground — it refreshes and injects the session bearer
 npx @metadium-did/platform-agent-js proxy --url <BRIEFICK_URL> [--port 8787]
 
-# 2) Claude Code에 그 로컬 프록시를 MCP로 등록(다른 터미널)
+# 2) Register that local proxy with Claude Code as an MCP server (in another terminal)
 claude mcp add --transport http briefick http://127.0.0.1:8787/mcp
 ```
 
-- **127.0.0.1 전용**(로컬), 기본 포트 **8787**(`--port`), 대상 MCP 경로 기본 `/api/mcp`(`--mcp-path`).
-- **투명 포워딩**: 메서드·본문·헤더·응답 스트림(**SSE 포함**) 그대로, `Authorization`만 최신 bearer로 덮어쓴다.
-- **만료/철회**: RP가 401/거부를 내면 프록시는 **그대로 전달**(자체 판단 안 함). bearer는 계속 갱신되므로 다음 요청은 새 토큰.
-- **포그라운드 실행**(Ctrl+C 종료). 상시 데몬은 `launchd`/`pm2` 등으로 감싸면 됨. 첫 실행 시 위임 VC 회수(지갑 승인) 후 `~/.metapass-agent/key.json`에 저장 → 재기동 시 재회수 불필요.
+- **Binds 127.0.0.1 only.** Default port **8787** (`--port`); default upstream MCP path `/api/mcp`
+  (`--mcp-path`).
+- **Transparent forwarding**: method, body, headers and the response stream (**including SSE**) pass
+  through unchanged; only `Authorization` is overwritten with the current bearer.
+- **Expiry and revocation**: a 401 or refusal from the RP is **passed straight through** — the proxy
+  makes no judgement of its own. The bearer keeps refreshing, so the next request carries a new one.
+- **Runs in the foreground** (Ctrl+C to stop). Wrap it in `launchd`, `pm2` or similar to keep it
+  resident. On first run it retrieves the delegation VC (after wallet approval) and saves it to
+  `~/.metapass-agent/key.json`, so a restart does not need approval again.
 
-## 설치 (라이브러리)
+## Install (as a library)
 
 ```bash
 npm install @metadium-did/platform-agent-js
 ```
 
-## 빠른 시작
+## Quick start
 
 ```ts
 import { AgentKey, BriefickAgentClient, AgentAuth } from "@metadium-did/platform-agent-js";
 
-// 1) 에이전트 키(최초 1회 생성 후 파일로 영속 — 같은 did:jwk 유지)
+// 1) Agent key — generate once, then persist it so the did:jwk stays the same
 const key = await AgentKey.generate();
-console.log("이 에이전트 DID:", key.did);        // did:jwk:...  (Briefick UI에 등록)
+console.log("this agent's DID:", key.did);       // did:jwk:...  (register this in the Briefick UI)
 // fs.writeFileSync("agent-key.json", JSON.stringify(key.exportPrivateJwk()));
 // const key = await AgentKey.fromPrivateJwk(JSON.parse(fs.readFileSync("agent-key.json","utf8")));
 
 const client = new BriefickAgentClient({ baseUrl: process.env.BRIEFICK_URL!, key });
 
-// 2) 등록 — 사용자가 Briefick /publish 에서 발급한 페어링 코드로 바인딩(PoP)
+// 2) Register — bind with the pairing code the user issued from Briefick /publish (PoP)
 await client.register(process.env.PAIRING_CODE!);
 
-// 3) 사용자가 지갑에서 위임을 승인하면, 위임 VC를 회수(폴링)
+// 3) Once the user approves the delegation in their wallet, retrieve the VC (polling)
 const credential = await client.waitForDelegation();
 
-// 4) 세션 bearer 교환 + 만료 전 자동 갱신
+// 4) Exchange for a session bearer and keep it refreshed before expiry
 const auth = new AgentAuth({
   client,
   credential,
-  onRefresh: (bearer) => console.log("새 세션 bearer:", bearer), // MCP 고정 헤더에 반영
+  onRefresh: (bearer) => console.log("new session bearer:", bearer), // push into the fixed MCP header
 });
 await auth.start();
 
-// 5) 이후 MCP 호출은 항상 유효한 bearer로
+// 5) From here on, MCP calls always carry a valid bearer
 await fetch(process.env.BRIEFICK_URL + "/api/mcp", { headers: auth.authHeader() });
 ```
 
-## 라이브러리 API — import해서 bearer 받기
+## Library API — importing it to get a bearer
 
-프로그램적 진입점: **ESM `dist/index.js` + 타입 `dist/index.d.ts`**. bearer는 `AgentAuth`(자동 갱신) 또는
-`AgentClient.exchange`(1회)로 받는다.
+The programmatic entry point is **ESM `dist/index.js` with types in `dist/index.d.ts`**. Get a bearer
+either from `AgentAuth` (refreshed automatically) or from `AgentClient.exchange` (one-shot).
 
 ```ts
 import { AgentKey, AgentClient, AgentAuth, loadStore, defaultKeyFile } from "@metadium-did/platform-agent-js";
 
-// CLI가 저장한 키/위임 VC 재사용
+// Reuse the key and delegation VC the CLI already stored
 const store = loadStore(defaultKeyFile())!;
 const key = await AgentKey.fromPrivateJwk(store.privateJwk);
 const client = new AgentClient({ baseUrl: "https://briefick.cplabs.io", key });
-const credential = store.credentials!["https://briefick.cplabs.io"]; // 회수·저장된 위임 VC
+const credential = store.credentials!["https://briefick.cplabs.io"]; // the retrieved, stored delegation VC
 
-// (a) 자동 갱신 — bearer()/authHeader()
+// (a) Automatic refresh — bearer() / authHeader()
 const auth = new AgentAuth({ client, credential });
 await auth.start();
-auth.bearer();        // string  — 현재 세션 bearer
+auth.bearer();        // string  — the current session bearer
 auth.authHeader();    // { Authorization: "Bearer …" }
 auth.stop();
 
-// (b) 1회 교환
+// (b) One-shot exchange
 const r = await client.exchange(credential);  // { status:"issued", bearer, expiresAt, scope }
 ```
 
-### 서비스 중립 (다른 RP)
+### Service-neutral (other RPs)
 
-`AgentClient`는 엔드포인트 경로·PoP `aud`를 **설정으로 받는다**(기본값 = Briefick 계약). 다른 서비스는 `service`만 지정:
+`AgentClient` takes its endpoint paths and PoP `aud` values **from configuration**, defaulting to the
+Briefick contract. For another service, pass `service`:
 
 ```ts
 new AgentClient({ baseUrl, key, service: {
@@ -160,34 +183,38 @@ new AgentClient({ baseUrl, key, service: {
 }});
 ```
 
-`BriefickAgentClient`는 기본값 프리셋 별칭(`=== AgentClient`)이라 하위호환된다. 홀더 암호(`AgentKey`·`presentVpToken`)·
-`AgentAuth`·`startProxy`는 서비스와 무관한 범용 코어다.
+`BriefickAgentClient` is an alias for the preset defaults (`=== AgentClient`), kept for backward
+compatibility. The holder cryptography (`AgentKey`, `presentVpToken`), `AgentAuth` and `startProxy`
+are service-independent.
 
-## 흐름 (Briefick 기본 계약)
+## The flow (Briefick's default contract)
 
 ```text
-등록   POST /api/agent/register          {didJwk, code, pop(aud=briefick-agent-register)}
-회수   POST /api/agent/delegation/retrieve {didJwk, pop(aud=briefick-agent-retrieve)}  → {credential}
-세션   POST /api/agent/session/start      {didJwk, pop(aud=briefick-agent-session)}    → {state, nonce, responseUri}
-       (위임 VP를 sso responseUri에 제시)  POST {vpToken}
-       POST /api/agent/session/complete   {state, didJwk, pop}                          → {bearer, expiresAt, scope}
+register   POST /api/agent/register             {didJwk, code, pop(aud=briefick-agent-register)}
+retrieve   POST /api/agent/delegation/retrieve  {didJwk, pop(aud=briefick-agent-retrieve)}  → {credential}
+session    POST /api/agent/session/start        {didJwk, pop(aud=briefick-agent-session)}   → {state, nonce, responseUri}
+           (present the delegation VP to the sso responseUri)  POST {vpToken}
+           POST /api/agent/session/complete     {state, didJwk, pop}                        → {bearer, expiresAt, scope}
 ```
 
-PoP는 등록할 **did:jwk 개인키로 서명한 ES256 JWT**(aud 스코핑 + iat). 세션 bearer는 짧은 TTL이라
-`AgentAuth`가 만료 전 재교환한다. MCP 클라이언트는 고정 헤더 하나만 두고, `onRefresh`로 값만 갱신.
+A PoP is an **ES256 JWT signed with the private key of the did:jwk being registered**, scoped by
+`aud` and carrying `iat`. Session bearers are short-lived, so `AgentAuth` re-exchanges before expiry.
+An MCP client keeps one fixed header and updates only its value, from `onRefresh`.
 
-## 배포 측 값 (Briefick env)
+## Deployment-side values (Briefick env)
 
-- `METAPASS_DELEGATION_VCT` = `https://sso.cplabs.io/creds/delegation/worklog/v1` (등록된 위임 vct)
-- `METAPASS_DELEGATION_ADMIN_KEY` = sso.cplabs.io 배포 시 설정한 `PLATFORM_SECURITY_API_KEY`
-  (New-Platform이 "발급"하는 값이 아니라 그 검증자 인스턴스의 env 비밀).
+- `METAPASS_DELEGATION_VCT` = `https://sso.cplabs.io/creds/delegation/worklog/v1` — the registered
+  delegation vct.
+- `METAPASS_DELEGATION_ADMIN_KEY` = the `PLATFORM_SECURITY_API_KEY` set when sso.cplabs.io was
+  deployed. This is a secret belonging to that verifier instance; it is not a value New-Platform
+  issues.
 
 ## Release signing key
 
 Release assets are verified against this minisign public key. `install.sh` refuses to install
 without a successful signature check.
 
-```
+```text
 RWT8kUm/J8uyqoOFON5wRNBUCOUtn4+nX0YeyYMItdo2J6iVNYd4uUAX
 ```
 
@@ -202,15 +229,18 @@ Checking the SHA256 sums alone is not enough: an attacker who can replace an ass
 the sums file with it. The signature is what ties the sums to the publisher, so the key has to
 come from somewhere other than the release you are checking — that is why it is published here.
 
-## 와이어 포맷 패리티
+## Wire-format parity
 
-did:jwk(정준 JWK 순서), SD-JWT VC 제시(`core = issuerJwt~disc~…~`, `sd_hash = base64url(SHA-256(ASCII(core)))`),
-KB-JWT(`typ=kb+jwt`, `{iat,aud,nonce,sd_hash}`)는 **`platform-java`와 바이트 일치**해야 한다.
+did:jwk (canonical JWK member order), SD-JWT VC presentation
+(`core = issuerJwt~disc~…~`, `sd_hash = base64url(SHA-256(ASCII(core)))`) and KB-JWT
+(`typ=kb+jwt`, `{iat,aud,nonce,sd_hash}`) must be **byte-identical to `platform-java`**.
 
-- 자체 검증: `npm test`
-- 크로스검증: `platform-java` `AgentJsParityTest` — Java가 발급한 위임 VC를 이 클라이언트가 제시하고
-  `VerifierCore.verify`가 수락함을 확인(홀더 제시 경로 3-런타임 불변식). `node` 설치 시 자동 실행.
+- Self-check: `npm test`
+- Cross-check: `AgentJsParityTest` in `platform-java` takes a delegation VC issued by Java, has this
+  client present it, and confirms that `VerifierCore.verify` accepts it — the holder-presentation
+  invariant across the three runtimes. It runs automatically when `node` is installed.
 
-## 범위
+## Scope
 
-ES256/P-256, 홀더 **제시** 경로 전용(발급·검증은 플랫폼 몫). 다른 곡선·발급 로직은 미지원.
+ES256 / P-256, holder **presentation** path only; issuance and verification belong to the platform.
+Other curves and issuance logic are not supported.
