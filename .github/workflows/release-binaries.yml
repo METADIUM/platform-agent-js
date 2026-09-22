@@ -29,7 +29,12 @@ jobs:
           tag="${{ github.event.release.tag_name }}"
           test "$tag" = "v$expected" || {
             echo "🔴 태그($tag)와 package.json(v$expected)이 다르다 — 잘못된 커밋에 태그가 붙었다"; exit 1; }
-          ./dist-bin/metapass-agent-darwin-arm64 --version > /tmp/sea-version.txt
+          # 🔴 **레포 안에서 돌리면 안 된다.** `dist-bin/../package.json` 이 실재해서
+          #    박지 않아도 **파일 폴백이 성공**한다 — 게이트가 조용히 초록이 된다(개악으로 확인).
+          #    사용자의 조건(옆에 package.json 이 없다)을 만들어서 재야 한다.
+          probe=$(mktemp -d)
+          cp dist-bin/metapass-agent-darwin-arm64 "$probe/"
+          (cd "$probe" && ./metapass-agent-darwin-arm64 --version) > /tmp/sea-version.txt
           actual=$(cat /tmp/sea-version.txt)
           test "$actual" = "$expected" || {
             echo "🔴 바이너리가 말하는 판($actual)이 package.json($expected)과 다르다"; exit 1; }
