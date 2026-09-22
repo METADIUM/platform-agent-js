@@ -30,8 +30,17 @@ esac
 case "$MINISIGN_PUB" in
   __REPLACE_*) echo "오류(fail-closed): 이 install.sh에 배포 공개키가 설정되지 않았습니다 — 서명 없는 채널로는 설치하지 않습니다"; exit 1 ;;
 esac
+# 🔴 **거부는 맞는데 하는 말이 반쪽이었다**(briefick, s249 실사용). 종전 문구는 «설치 방법» 만
+#    알려 주고 **왜 필요한지**를 안 말해서, 처음 보는 사람이 「의존성이 하나 더 있네」로 읽고
+#    **서명 검증을 건너뛰는 우회로**(바이너리를 직접 받아 복사)를 찾을 수 있었다.
+#    ⇒ 무엇을 위한 것인지 · 없이 설치하면 무엇을 잃는지를 같이 말한다.
 command -v minisign >/dev/null || {
-  echo "오류(fail-closed): minisign이 필요합니다 — brew install minisign / dnf·apt install minisign"; exit 1; }
+  echo "오류(fail-closed): minisign이 없습니다."
+  echo "  이 스크립트는 SHA256SUMS의 **서명**을 검증한 뒤에만 설치합니다 — minisign은 그 검증에 씁니다."
+  echo "  건너뛰고 바이너리를 직접 받아 복사하면 **서명 없는 채널**이 됩니다(체크섬만으로는"
+  echo "  배포물이 바뀌었는지 알 수 없습니다 — 체크섬 파일도 같이 바뀔 수 있습니다)."
+  echo "  설치: brew install minisign  /  apt install minisign  /  dnf install minisign"
+  exit 1; }
 
 BASE="https://github.com/$REPO/releases/download/$VERSION"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
