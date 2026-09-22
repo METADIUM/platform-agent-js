@@ -100,3 +100,45 @@ describe("--version 은 못 읽으면 못 읽었다고 말한다", () => {
     expect(out).toEqual(["9.9.9"]);
   });
 });
+
+/**
+ * 🔴 **이 메시지는 「설치형 0.5.1」 한 종류만 읽는다 — 실측으로 그렇다.**
+ * ```
+ * npm 0.5.0 이상    판을 찍는다            ⇒ 이 분기에 못 온다
+ * npm 0.5.0 미만    「알 수 없는 명령」      ⇒ 이 분기 아니다
+ * 설치형 0.5.1       **여기**               ⇒ 유일한 독자
+ * ```
+ * ⚠️ 그런데 종전 문구는 *"npx 로 쓰는 중이면 … (예: `@^0.4.0`)"* 였다 — **닿지 않는 독자에게만
+ *    보이는 조언**이고, 그 조언이 하는 일은 **범위 스펙을 눈에 넣는 것**뿐이었다.
+ *    게다가 그 예시를 그대로 치면 `0.4.1` 로 풀려 **`--version` 이 또 죽는다**(실측:
+ *    `npx …@^0.4.0 --version` → exit 1 + 도움말 덤프). 진단하러 온 사람에게 **같은 실패를
+ *    한 번 더** 주고 있었다(metapass-saas 지적).
+ * 📌 그리고 소비처(briefick)는 화면에서 범위 스펙을 **0건으로 잠갔는데**, 사용자가 실제로 읽는
+ *    것은 이 CLI 출력이라 그 잠금이 **여기까지 안 닿았다.** 그래서 이 검사가 이쪽에 있어야 한다.
+ */
+describe("판 실패 메시지는 범위 스펙을 보여 주지 않는다", () => {
+  let err: string[];
+  beforeEach(() => {
+    vi.clearAllMocks();
+    err = [];
+    vi.spyOn(console, "error").mockImplementation((m?: unknown) => { err.push(String(m)); });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    mockRead.mockImplementation(() => { throw new Error("SEA: no package.json"); });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("출력에 `@^`·`@~` 가 없다", async () => {
+    const code = await main(["--version"]);
+    expect(code).toBe(1);
+    const 전문 = err.join("\n");
+    expect(전문).toContain("판을 읽지 못했다");
+    expect(전문).not.toMatch(/@[\^~]/);
+  });
+
+  it("설치형 처방을 먼저 준다", async () => {
+    await main(["--version"]);
+    const 줄 = err.join("\n").split("\n").filter((l) => l.trim());
+    // 첫 줄은 판별자, 둘째 줄이 처방이어야 한다 — 이 메시지의 유일한 독자가 설치형이므로
+    expect(줄[1]).toContain("설치형");
+  });
+});
