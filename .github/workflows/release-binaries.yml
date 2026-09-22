@@ -39,6 +39,40 @@ jobs:
           test "$actual" = "$expected" || {
             echo "🔴 바이너리가 말하는 판($actual)이 package.json($expected)과 다르다"; exit 1; }
           echo "🟢 판 일치: $tag == v$actual"
+
+          # ── 층①: **4타깃 전수** · 실행 불필요 (metapass-saas 제안) ─────────────────
+          # 🔴 배포는 4타깃인데 위 실행 검사는 **1타깃**이다. `--define` 이 한 타깃에만
+          #    들어가는 개악은 위 검사로 초록이다. 아래는 실행 없이 넷을 다 잰다.
+          # ⚠️ 판 검사는 **따옴표를 포함한 고정문자열**이어야 한다. 실측으로 셋을 갈랐다:
+          #      정확행 `grep -x '0.5.2'`   판을 박아도 **0건** → 거짓 빨강
+          #                                 (번들에서 `return "0.5.2"` 로 접혀 독립된 줄이 아니다)
+          #      정규식 `grep '0.5.2'`      안 박은 바이너리에서 **8건** → 거짓 초록
+          #                                 (`.` 가 와일드카드라 base64 잡음에 맞는다)
+          #      `grep -F '"0.5.2"'`        박음 1 · 안 박음 0 (네 바이너리 대조) → 이것을 쓴다
+          # ⚠️ `file` 문자열은 추측하지 않고 v0.5.1 자산 헤더를 받아 **실측**했다:
+          #    darwin 은 `x86_64`, linux 는 `x86-64` 로 표기가 다르다.
+          fail=0
+          for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            bin="dist-bin/metapass-agent-$t"
+            if [ ! -f "$bin" ]; then echo "🔴 $t: 자산이 없다"; fail=1; continue; fi
+            desc=$(file -b "$bin")
+            case "$t" in
+              darwin-arm64) want="Mach-O 64-bit executable arm64" ;;
+              darwin-x64)   want="Mach-O 64-bit executable x86_64" ;;
+              linux-x64)    want="ELF 64-bit LSB executable, x86-64" ;;
+              linux-arm64)  want="ELF 64-bit LSB executable, ARM aarch64" ;;
+            esac
+            case "$desc" in
+              *"$want"*) : ;;
+              *) echo "🔴 $t: 아키텍처가 이름과 다르다 — $desc"; fail=1 ;;
+            esac
+            n=$(strings -a "$bin" | grep -cF -- "\"$expected\"" || true)
+            if [ "$n" -lt 1 ]; then echo "🔴 $t: 판 '$expected' 이 번들에 안 박혔다"; fail=1; fi
+            if ! grep -q "  metapass-agent-$t$" dist-bin/SHA256SUMS; then
+              echo "🔴 $t: SHA256SUMS 에 없다"; fail=1; fi
+          done
+          [ "$fail" -eq 0 ] || { echo "🔴 층① 전수 검사 실패"; exit 1; }
+          echo "🟢 층① 4타깃 전수 통과 (아키텍처 · 박힌 판 · SHA256SUMS)"
       - name: Sign SHA256SUMS (minisign — 릴리스 게이트)
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
