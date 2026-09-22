@@ -347,6 +347,7 @@ const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 
   npx @metadium-did/platform-agent-js up --install      # OS 데몬 설치+시작(launchd/systemd --user+linger)
   npx @metadium-did/platform-agent-js down --uninstall  # OS 데몬 중지·제거
   npx @metadium-did/platform-agent-js upgrade           # 유닛 재설치(실행 라인 갱신)·재시작
+                                                       # ⚠ 판은 안 바뀐다 — 설치형은 install.sh 를 다시 돌려라
 
 사용(단일 RP·저수준):
   npx @metadium-did/platform-agent-js register --url <RP_URL> --code <PAIRING_CODE>
@@ -614,12 +615,19 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  // ⚠️ **`upgrade` 는 판을 안 바꾼다.** 유닛(plist/systemd)의 실행 라인만 갱신하고 재시작한다 —
+  //    `install.ts` 는 어디서도 바이너리를 복사하지 않는다. 설치형에서 실행 라인이 이미 맞아 있으면
+  //    **파일이 그대로 남아** 「업그레이드했는데 판이 그대로」가 된다(briefick 실측).
+  //    ⇒ 이름이 부르는 기대와 하는 일이 달라서, 명령 자신이 그 차이를 말하게 한다.
   if (args.cmd === "upgrade") {
     // 실행 라인(버전·경로)이 바뀌었을 수 있으므로 유닛 재설치 = 최신 실행 라인으로 재기동
     const dir0 = configDir(args.keyFile);
     const r = installUnit(join(dir0, "daemon.log"));
     console.log(`✅ 유닛 재설치·재시작(${r.kind}): ${r.unitPath}`);
     for (const n of r.notes) console.log("  " + n);
+    // 🔴 이름이 «판을 올린다» 로 읽히는데 이 명령은 **유닛만** 만진다. 그 차이를 여기서 말한다.
+    console.log("  ⚠️ 판은 안 바뀌었다 — 이 명령은 유닛(실행 라인)만 갱신한다.");
+    console.log("     설치형(단일 바이너리)이면 install.sh 를 다시 돌려야 파일이 교체된다.");
     return 0;
   }
 
@@ -759,7 +767,24 @@ export async function main(argv: string[]): Promise<number> {
  *    거부」가 들어와도 **옛 판을 쓰는 사람에겐 안 온다** — 그 사람의 CLI 는 여전히 침묵한다.
  *    그래서 둘은 독립이다(metapass-saas·briefick 실측).
  */
+/**
+ * 🔴 **SEA 단일 바이너리에는 읽을 `package.json` 이 없다.** 위 주석이 「걸릴 자리가 있다」고
+ *    예견한 그 분기가 실제로 걸렸다 — 릴리스 `v0.5.1` 의 바이너리에서 `--version` 이
+ *    exit 1 로 «판을 읽지 못했다» 를 냈다(New-Platform 실측).
+ *
+ * ⚠️ 그리고 그 자리가 **`--version` 이 가장 필요한 자리**다: npx 사용자는 명령에 박힌 핀으로
+ *    판을 이미 알지만, **설치형 사용자는 확인할 방법이 재설치뿐**이었다.
+ *
+ * ⇒ 빌드 때 판을 **번들에 박는다**(`scripts/build-sea.mjs` 의 esbuild `--define`).
+ *   - SEA 번들: `__AGENT_VERSION__` 이 문자열 리터럴로 치환돼 파일을 안 읽는다
+ *   - npm 빌드(tsc): 그 이름이 **없는 전역**이라 `typeof` 가 `"undefined"` — 던지지 않고
+ *     종전대로 `package.json` 을 읽는다. 두 경로가 서로를 안 건드린다
+ */
+declare const __AGENT_VERSION__: string | undefined;
+
 function packageVersion(): string | null {
+  // 빌드 때 박은 값이 있으면 그것이 답이다 — 파일이 없는 실행본도 판을 말할 수 있어야 한다.
+  if (typeof __AGENT_VERSION__ === "string" && __AGENT_VERSION__ !== "") return __AGENT_VERSION__;
   try {
     const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
     return (JSON.parse(raw) as { version?: string }).version ?? null;

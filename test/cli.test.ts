@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import http from "node:http";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
@@ -298,5 +299,34 @@ describe("모르는 옵션은 거부한다 · --version", () => {
   it("⚠️ 모르는 옵션이 이기게 한다 — 아는 명령과 섞여도 실행하지 않는다", async () => {
     // 여기서 0 이 나오면 「판만 찍고 넘어갔다」는 뜻이고, 그건 조용한 무시의 재발이다.
     expect(await main(["--version", "--bogus-flag-xyz"])).toBe(1);
+  });
+});
+
+/**
+ * 🔴 **소스의 형태가 빌드와 맺은 계약이다.** `scripts/build-sea.mjs` 는 esbuild
+ * `--define:__AGENT_VERSION__=…` 로 **맨 식별자**를 텍스트 치환한다 — `globalThis.__AGENT_VERSION__`
+ * 로 바꾸면 `--define` 이 겨냥하지 못한다.
+ *
+ * ⚠️ 그런데 다른 검사들은 **전역 속성**(`globalThis.__AGENT_VERSION__ = …`)으로 넣어 잰다.
+ *    맨 식별자가 전역 속성으로도 풀리므로 **드리프트가 나도 그 검사들은 초록**이다.
+ *    실측(개악): 소스를 `globalThis.…` 로 바꾸면 **vitest 72 통과 · 번들 0건 ·
+ *    바이너리 `--version` exit 1** — v0.5.1 과 같은 실패가 조용히 돌아온다(briefick 지적).
+ *
+ * 📌 그래서 여기서는 **소스 텍스트**를 본다. 보통은 「선언을 재는 검사」라 피해야 하지만,
+ *    여기서 지켜야 할 것 자체가 **텍스트 계약**이다. 빌드가 보는 것과 같은 것을 본다.
+ * 🔵 이중으로 잠근다 — `build-sea.mjs` 도 번들에 판이 박혔는지 빌드 때 단언한다.
+ *    이 검사는 **빌드 없이**(`npm test`) 잡고, 그쪽은 빌드하면 잡는다.
+ */
+describe("판 주입은 빌드와의 텍스트 계약이다", () => {
+  const src = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
+
+  it("맨 식별자로 읽는다 — globalThis 를 거치지 않는다", () => {
+    expect(src).toContain("typeof __AGENT_VERSION__ ===");
+    expect(src).not.toContain("globalThis as Record<string, unknown>).__AGENT_VERSION__");
+  });
+
+  it("빌드가 그 이름을 실제로 겨냥한다", () => {
+    const build = readFileSync(new URL("../scripts/build-sea.mjs", import.meta.url), "utf8");
+    expect(build).toContain("--define:__AGENT_VERSION__=");
   });
 });

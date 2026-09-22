@@ -25,8 +25,14 @@ function run(cmd, args, opts = {}) {
 
 // 1) 단일 CJS 번들 (SEA main은 CommonJS 단일 파일이어야 함)
 mkdirSync(OUT, { recursive: true });
+// 🔴 **판을 번들에 박는다.** SEA 에는 읽을 package.json 이 없어 `--version` 이 exit 1 로
+//    «판을 읽지 못했다» 를 냈다(v0.5.1 실측). npx 사용자는 명령의 핀으로 아는데 설치형
+//    사용자는 **재설치 말고는 확인할 방법이 없었다** — 거기가 `--version` 이 가장 필요한 자리다.
+// ⚠️ 여기 박는 값과 package.json 이 갈리면 바이너리가 **거짓 판**을 말한다. 아래 esbuild 는
+//    같은 `version` 변수를 쓰고, CI 는 빌드 뒤 `--version` 을 실제로 돌려 대조한다(release-binaries.yml).
 run("npx", ["esbuild", "src/cli.ts", "--bundle", "--platform=node", "--format=cjs",
   "--outfile=dist-bin/sea-bundle.cjs", "--define:import.meta.url=__sea_meta_url",
+  `--define:__AGENT_VERSION__=${JSON.stringify(version)}`,
   "--banner:js=const __sea_meta_url = require('url').pathToFileURL(__filename).href;"]);
 
 // 2) SEA blob (교차 주입 가능: useCodeCache/useSnapshot 비활성)
@@ -38,6 +44,22 @@ writeFileSync(join(OUT, "sea-config.json"), JSON.stringify({
   useSnapshot: false,
 }));
 run(process.execPath, ["--experimental-sea-config", "dist-bin/sea-config.json"]);
+// 🔴 **판이 번들에 실제로 박혔는지 여기서 즉시 확인한다.** 빌드가 판을 못 박으면
+//    바이너리는 v0.5.1 과 **같은 실패**(`--version` 이 exit 1)를 내는데, 그것을 릴리스
+//    게이트에서야 알면 이미 릴리스가 잘린 뒤다.
+// ⚠️ 이 단언이 없으면 소스가 `globalThis.__AGENT_VERSION__` 로 바뀌기만 해도 조용히 깨진다 —
+//    `--define` 은 **맨 식별자**를 겨냥하므로 `globalThis.X` 는 안 바뀌고, 단위 검사는
+//    전역 속성을 쓰므로 **그대로 초록**이다(실측: vitest 72 통과 · 번들 0건 · 바이너리 exit 1).
+{
+  const bundled = readFileSync(join(OUT, "sea-bundle.cjs"), "utf8");
+  if (!bundled.includes(`"${version}"`)) {
+    throw new Error(
+      `판 ${version} 이 번들에 안 박혔다 — esbuild --define 이 안 먹었다.\n` +
+      `  src/cli.ts 가 \`__AGENT_VERSION__\` 를 **맨 식별자**로 읽는지 확인하라.\n` +
+      `  \`globalThis.__AGENT_VERSION__\` 로 바꾸면 --define 이 겨냥하지 못한다.`);
+  }
+}
+
 const blob = join(OUT, "sea-prep.blob");
 
 const HOST = `${process.platform}-${process.arch}`;

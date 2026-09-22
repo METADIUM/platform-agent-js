@@ -53,9 +53,20 @@ ACTUAL="$(shasum -a 256 "$TMP/metapass-agent" 2>/dev/null | cut -d' ' -f1 || sha
 
 DEST="${METAPASS_AGENT_BIN_DIR:-$HOME/.metapass-agent/bin}"
 mkdir -p "$DEST"
+# 🔵 갈아끼우는 경우인지 **덮어쓰기 전에** 기억한다 — 아래 경고는 최초 설치에는 안 나와야 한다.
+#    「놀라지 마라」인 경고를 놀랄 일 없는 사람에게 미리 주면 **다음에 진짜 났을 때 안 읽힌다**(briefick).
+HAD_OLD=0; [ -e "$DEST/metapass-agent" ] && HAD_OLD=1
 install -m 0755 "$TMP/metapass-agent" "$DEST/metapass-agent"
 echo "✅ 설치: $DEST/metapass-agent ($VERSION, 서명 검증됨)"
+if [ "$HAD_OLD" = 1 ]; then
+  cat <<'NOTE'
+  ⚠️ 상주 데몬을 돌리고 있었다면 launchctl/systemctl 에
+     last exit reason = OS_REASON_CODESIGNING 이 보일 수 있습니다 — **정상입니다.**
+     돌던 옛 프로세스를 OS 가 정리한 기록이고 KeepAlive 가 곧바로 되살립니다.
+     판정은 그 줄이 아니라 **state = running · 포트 LISTEN** 으로 하십시오.
+NOTE
+fi
 echo "다음:"
 echo "  $DEST/metapass-agent add <RP_URL> --code <CODE>"
-echo "  $DEST/metapass-agent up --install    # OS 데몬 등록(재부팅 자동 기동)"
+echo "  $DEST/metapass-agent up --install    # OS 데몬 등록(최초 1회 · 재부팅 자동 기동)"
 case ":$PATH:" in *":$DEST:"*) ;; *) echo "  (PATH 추가 권장: export PATH=\"\$PATH:$DEST\")" ;; esac
