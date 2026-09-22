@@ -22,6 +22,11 @@ jobs:
       #    그대로 나갔다 — 아무도 **자산을 받아 돌려 보지 않았기** 때문이다.
       # ⚠️ 파이프·명령치환으로 받지 않는다: 바이너리가 죽으면 종료코드가 삼켜지고
       #    빈 문자열 비교가 «다르다» 로만 보여 **원인이 안 보인다**.
+      # ⚠️ **이 실행 검사는 4타깃 중 하나(darwin-arm64)만 돈다** — `macos-14` 러너에서
+      #    linux 바이너리를 못 돌린다. 「4타깃이 실행 검증됐다」로 읽지 말 것.
+      #    넷이 **같은 번들**에서 나오므로 v0.5.1 의 실패 모양(SEA 에 package.json 이 없다)은
+      #    하나로도 잡히고, 타깃별로 갈리는 것은 아래 층①이 실행 없이 전수로 덮는다.
+      #    📌 linux-x64 에서도 같은 증상이라는 것은 briefick 이 v0.5.1 자산으로 실측했다.
       - name: Gate — 바이너리가 말하는 판 == package.json == 태그
         run: |
           set -euo pipefail
@@ -83,6 +88,19 @@ jobs:
           printf '%s\n' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
           printf '%s\n' "$MINISIGN_PASSWORD" | minisign -Sm dist-bin/SHA256SUMS -s /tmp/minisign.key
           rm -f /tmp/minisign.key
+      # 🔴 **게이트가 실패하면 릴리스는 이미 공개돼 있다**(`on: release: published` 는 릴리스
+      #    객체가 생긴 **뒤** 돈다). 그대로 두면 «공개된 릴리스 + 자산 0개» 가 남고,
+      #    소비처의 `gh release download <tag> -p install.sh` 가 **404** 로 죽는다.
+      # ⚠️ v0.5.1 보다 조용하다 — 그건 「자산은 있는데 기능이 없는」 거라 쓰면 드러났고,
+      #    이건 **설치 자체가 실패**한다(briefick 지적).
+      - name: 실패하면 릴리스를 초안으로 되돌린다
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ github.event.release.tag_name }}" --draft
+          echo "⚠️ 게이트 실패 — 릴리스를 초안으로 되돌렸다. 고친 뒤 다시 publish 하라."
+
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}

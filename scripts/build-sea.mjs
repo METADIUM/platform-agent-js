@@ -44,6 +44,22 @@ writeFileSync(join(OUT, "sea-config.json"), JSON.stringify({
   useSnapshot: false,
 }));
 run(process.execPath, ["--experimental-sea-config", "dist-bin/sea-config.json"]);
+// 🔴 **판이 번들에 실제로 박혔는지 여기서 즉시 확인한다.** 빌드가 판을 못 박으면
+//    바이너리는 v0.5.1 과 **같은 실패**(`--version` 이 exit 1)를 내는데, 그것을 릴리스
+//    게이트에서야 알면 이미 릴리스가 잘린 뒤다.
+// ⚠️ 이 단언이 없으면 소스가 `globalThis.__AGENT_VERSION__` 로 바뀌기만 해도 조용히 깨진다 —
+//    `--define` 은 **맨 식별자**를 겨냥하므로 `globalThis.X` 는 안 바뀌고, 단위 검사는
+//    전역 속성을 쓰므로 **그대로 초록**이다(실측: vitest 72 통과 · 번들 0건 · 바이너리 exit 1).
+{
+  const bundled = readFileSync(join(OUT, "sea-bundle.cjs"), "utf8");
+  if (!bundled.includes(`"${version}"`)) {
+    throw new Error(
+      `판 ${version} 이 번들에 안 박혔다 — esbuild --define 이 안 먹었다.\n` +
+      `  src/cli.ts 가 \`__AGENT_VERSION__\` 를 **맨 식별자**로 읽는지 확인하라.\n` +
+      `  \`globalThis.__AGENT_VERSION__\` 로 바꾸면 --define 이 겨냥하지 못한다.`);
+  }
+}
+
 const blob = join(OUT, "sea-prep.blob");
 
 const HOST = `${process.platform}-${process.arch}`;
