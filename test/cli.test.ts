@@ -405,3 +405,70 @@ describe("`upgrade` 는 유닛만 만진다 — 두 레포 문구가 딛고 선 
     expect(new Set(cmds)).toEqual(new Set(["launchctl", "systemctl", "loginctl"]));
   });
 });
+
+/**
+ * 🔴 **이 두 문구는 소비처의 판별자다 — 문면이 계약이다.**
+ *
+ * briefick 화면은 설치형 사용자의 판을 `--version` **하나로** 가른다(2026-09-22, 탐침 두 줄을
+ * 지우고 이것으로 대체). 판별은 **오류 문구**로 한다:
+ *
+ * ```
+ * 판을 찍는다          → 그게 답
+ * 「알 수 없는 명령」   → 0.5.0 미만        (npm 10판 + 설치형 v0.4.0 = 11판 실측)
+ * 「판을 읽지 못했다」  → **설치형 0.5.1**   유일 — npm 0.5.1 은 판을 찍는다
+ * 어디에도 안 맞음      → 미분류. 추측하지 않고 갈아끼우게 한다
+ * ```
+ *
+ * ⚠️ 이 문구를 바꾸면 **남의 레포 화면이 조용히 판을 못 가른다.** 그쪽 설계가 오답 대신
+ * 「미분류」로 떨어지게 돼 있어 **틀린 답은 안 나오지만**, 판별 능력은 사라진다.
+ * 📌 이 검사는 그 사실을 **이 레포 안에 둔다** — 바꿔야 할 이유가 생기면 여기서 걸리고,
+ *    그때 briefick 에 알리면 된다. 검사가 없으면 **바뀐 줄도 모른다.**
+ *
+ * 🔵 사본을 합칠 수 없는 자리다(문구는 여기, 판별은 저기). 그래서 **둘이 딛고 선 바닥**을
+ *    잠근다 — `#8` 에서 `install.ts` 에 한 것과 같은 수다.
+ */
+describe("판 판별 문구는 소비처와의 계약이다", () => {
+  const src = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
+  const 모르는명령 = "알 수 없는 명령: ";
+  const 판못읽음 = "판을 읽지 못했다 — 이 실행본 안에서 package.json 을 찾을 수 없다.";
+
+  it("두 문구가 소스에 그대로 있다", () => {
+    expect(src).toContain(모르는명령);
+    expect(src).toContain(판못읽음);
+  });
+
+  /**
+   * ⚠️ 한쪽이 다른 쪽을 품으면 **부분 일치로 가르는 소비처가 오분류**한다.
+   * 🔴 **소스에서 뽑아 비교한다.** 앞 판은 이 파일에 적어 둔 상수 둘을 서로 비교했는데,
+   *    그건 **동어반복**이라 소스를 어떻게 바꿔도 초록이었다(개악 실측: 한쪽이 다른 쪽을
+   *    품게 만들어도 81 통과). 검사가 자기 자신을 재고 있었다.
+   */
+  it("실제로 내는 두 문구가 서로를 안 품는다", async () => {
+    const err: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((m?: unknown) => { err.push(String(m)); });
+    await main(["아무도-모르는-명령"]);
+    const 실제모르는명령 = err.join("\n").split("\n")[0];
+    spy.mockRestore();
+
+    // 「판을 읽지 못했다」 쪽은 소스에서 뽑는다 — 이 경로는 SEA 에서만 걸린다
+    // ⚠️ `[^"]*` 로 뽑으면 소스의 **이스케이프(`\\n`)까지** 딸려 와 런타임 문자열과 달라진다
+    //    ⇒ 포함 검사가 **영원히 false** 라 동어반복이 된다(개악으로 확인). 역슬래시에서 끊는다.
+    const m = src.match(/"(판을 읽지 못했다[^"\\]*)/);
+    expect(m).not.toBeNull();
+    const 실제판못읽음 = m![1];
+
+    expect(실제모르는명령).toContain("알 수 없는 명령");
+    expect(실제모르는명령.includes(실제판못읽음)).toBe(false);
+    expect(실제판못읽음.includes(실제모르는명령)).toBe(false);
+  });
+
+  /** 🔴 **실제로 그 문구를 내는지**까지 본다 — 소스에 있는 것과 나오는 것은 다르다. */
+  it("모르는 명령이 그 문구로 죽는다", async () => {
+    const err: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((m?: unknown) => { err.push(String(m)); });
+    const code = await main(["아무도-모르는-명령"]);
+    spy.mockRestore();
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain(모르는명령);
+  });
+});
