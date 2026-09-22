@@ -347,6 +347,7 @@ const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 
   npx @metadium-did/platform-agent-js up --install      # OS 데몬 설치+시작(launchd/systemd --user+linger)
   npx @metadium-did/platform-agent-js down --uninstall  # OS 데몬 중지·제거
   npx @metadium-did/platform-agent-js upgrade           # 유닛 재설치(실행 라인 갱신)·재시작
+                                                       # ⚠ 판은 안 바뀐다 — 설치형은 install.sh 를 다시 돌려라
 
 사용(단일 RP·저수준):
   npx @metadium-did/platform-agent-js register --url <RP_URL> --code <PAIRING_CODE>
@@ -614,12 +615,19 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  // ⚠️ **`upgrade` 는 판을 안 바꾼다.** 유닛(plist/systemd)의 실행 라인만 갱신하고 재시작한다 —
+  //    `install.ts` 는 어디서도 바이너리를 복사하지 않는다. 설치형에서 실행 라인이 이미 맞아 있으면
+  //    **파일이 그대로 남아** 「업그레이드했는데 판이 그대로」가 된다(briefick 실측).
+  //    ⇒ 이름이 부르는 기대와 하는 일이 달라서, 명령 자신이 그 차이를 말하게 한다.
   if (args.cmd === "upgrade") {
     // 실행 라인(버전·경로)이 바뀌었을 수 있으므로 유닛 재설치 = 최신 실행 라인으로 재기동
     const dir0 = configDir(args.keyFile);
     const r = installUnit(join(dir0, "daemon.log"));
     console.log(`✅ 유닛 재설치·재시작(${r.kind}): ${r.unitPath}`);
     for (const n of r.notes) console.log("  " + n);
+    // 🔴 이름이 «판을 올린다» 로 읽히는데 이 명령은 **유닛만** 만진다. 그 차이를 여기서 말한다.
+    console.log("  ⚠️ 판은 안 바뀌었다 — 이 명령은 유닛(실행 라인)만 갱신한다.");
+    console.log("     설치형(단일 바이너리)이면 install.sh 를 다시 돌려야 파일이 교체된다.");
     return 0;
   }
 
