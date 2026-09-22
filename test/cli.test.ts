@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import http from "node:http";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
@@ -485,16 +485,31 @@ describe("판 판별 문구는 소비처와의 계약이다", () => {
  *
  * 📌 주석은 뗀다 — 이 규칙의 **내력을 적는 것**까지 막으면 안 된다(`#8` 에서 같은 함정을 밟았다).
  */
-describe("사용자에게 나가는 문자열에 범위 스펙이 없다", () => {
-  const 주석뗀소스 = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+describe("src/ 전체의 문자열에 범위 스펙이 없다", () => {
+  /**
+   * ⚠️ **처음엔 `cli.ts` 하나만 읽었다.** 그런데 describe 이름은 「사용자에게 나가는 문자열」이었다 —
+   *    **이름이 범위보다 넓었다.** 사용자에게 말하는 파일은 둘이다(`cli.ts` · `daemon.ts` 의 audit 줄).
+   *    개악 실측(metapass-saas): `daemon.ts` 에 범위 스펙을 넣어도 **85 통과**였다.
+   * 📌 이 팀이 오늘 세운 규칙의 자기 사례다 — ***이름이 표본보다 좁아도 안 되고 넓어도 안 된다.***
+   * ⇒ 「어느 파일이 사용자에게 말하는가」를 목록으로 들고 있으면 **그 목록이 새 사본**이 된다.
+   *   `src/` 전수로 본다 — 파일이 늘어도 검사가 따라간다.
+   */
+  const 주석뗀 = (f: string) =>
+    readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
 
-  it("cli.ts 의 문자열에 `@^`·`@~` 가 없다", () => {
-    expect(주석뗀소스).not.toMatch(/@[\^~]\d/);
+  const 소스파일 = readdirSync(new URL("../src/", import.meta.url)).filter((f) => f.endsWith(".ts"));
+
+  it("src/ 에 .ts 가 여럿이다 — 목록이 비면 이 검사는 공허하다", () => {
+    expect(소스파일.length).toBeGreaterThan(1);
   });
 
-  it("도움말에도 없다", async () => {
+  it.each(소스파일)("%s 의 문자열에 `@^`·`@~` 가 없다", (f) => {
+    expect(주석뗀(f)).not.toMatch(/@[\^~]\d/);
+  });
+
+  it("도움말 출력에도 없다", async () => {
     const out: string[] = [];
     const spy = vi.spyOn(console, "log").mockImplementation((m?: unknown) => { out.push(String(m)); });
     await main(["--help"]);
