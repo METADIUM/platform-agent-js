@@ -349,17 +349,46 @@ describe("판 주입은 빌드와의 텍스트 계약이다", () => {
  * 📌 오늘의 말로: 사본 둘을 「한 문장」으로 합칠 수 없을 때는, 둘이 딛고 선 **바닥**을 잠근다.
  */
 describe("`upgrade` 는 유닛만 만진다 — 두 레포 문구가 딛고 선 사실", () => {
-  const src = readFileSync(new URL("../src/install.ts", import.meta.url), "utf8");
+  /** 🔴 **주석을 떼고 본다.** 안 떼면 이 규칙을 `install.ts` 에 **문서화하는 순간** 빨개진다
+   *  (`#5` 에서 이미 밟은 함정이 이 파일에 다시 있다 — briefick 지적). */
+  const src = readFileSync(new URL("../src/install.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
 
-  it("바이너리를 복사·이동하는 호출이 없다", () => {
-    for (const call of ["copyFileSync", "cpSync", "renameSync", "createWriteStream"]) {
-      expect(src).not.toContain(call);
-    }
+  /**
+   * 🔴 **개수를 세면 교환에 뚫린다** — 앞 판은 `writeFileSync` 가 둘인지만 봤다.
+   *    하나를 지우고 `writeFileSync(destBin, readFileSync(srcBin))` 를 더하면 **둘 그대로**다.
+   *    막으려던 바로 그것이 통과한다(briefick). 이 팀이 `#42` 에서 세운 규칙 그대로다:
+   *    **수가 아니라 이름**을 본다.
+   */
+  it("쓰는 대상이 유닛 파일 둘뿐이다 — 이름으로 본다", () => {
+    const targets = [...src.matchAll(/writeFileSync\(\s*([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
+    expect(new Set(targets)).toEqual(new Set(["plistPath", "unitPath"]));
   });
 
-  it("쓰는 것은 유닛 파일뿐이다", () => {
-    // writeFileSync 는 plist/systemd 유닛에만 쓰인다. 늘어나면 무엇을 쓰는지 다시 봐야 한다.
-    const writes = src.match(/writeFileSync\(/g) ?? [];
-    expect(writes.length).toBe(2);   // launchd plist · systemd unit
+  /**
+   * 🔴 **금지 목록은 내가 아는 방법만 막는다** — 앞 판은 `copyFileSync` 를 막고
+   *    `copyFile`(`node:fs/promises`) 은 못 막았다. 한 글자 차이고 `async` 안이라
+   *    비동기 쪽이 오히려 자연스럽다(briefick). ⇒ **허용 집합**으로 뒤집는다:
+   *    새 fs API 를 쓰려면 **임포트를 늘려야** 하고, 그 순간 여기서 빨개진다.
+   */
+  it("node:fs 에서 가져오는 것이 정확히 넷이다", () => {
+    const m = src.match(/import\s*\{([^}]*)\}\s*from\s*"node:fs"/);
+    expect(m).not.toBeNull();
+    const names = m![1].split(",").map((x) => x.trim()).filter(Boolean);
+    expect(new Set(names)).toEqual(new Set(["existsSync", "mkdirSync", "rmSync", "writeFileSync"]));
+  });
+
+  it("node:fs/promises 를 안 쓴다 — 비동기 복사가 들어올 문", () => {
+    expect(src).not.toContain('from "node:fs/promises"');
+  });
+
+  /**
+   * ⚠️ 위 둘로도 **`execFileSync("cp", …)`** 는 안 막힌다 — `execFileSync` 는 launchctl 때문에
+   *    이미 들어와 있다. 그래서 **실행하는 명령 이름**도 허용 집합으로 잠근다.
+   */
+  it("외부로 실행하는 명령이 셋뿐이다", () => {
+    const cmds = [...src.matchAll(/(?:run|runQuiet|execFileSync)\(\s*"([^"]+)"/g)].map((m) => m[1]);
+    expect(new Set(cmds)).toEqual(new Set(["launchctl", "systemctl", "loginctl"]));
   });
 });

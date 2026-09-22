@@ -44,6 +44,17 @@ jobs:
                    echo "   값 노출·등호형 거부·up --port 무시. 0.5.1 이상을 쓸 것."
                    exit 1 ;;
           esac
+
+          # 🔵 **손목록은 내가 아는 판만 막는다.** 다음 결함 판에도 듣게 npm 을 직접 본다
+          #    (briefick 제안). 위 손목록은 그대로 둔다 — **바닥은 로컬**이어야 한다.
+          # ⚠️ 이건 네트워크에 기댄다. 조회가 실패하면 **막지 않는다**(손목록이 이미 막고 있고,
+          #    네트워크 장애로 릴리스를 못 자르게 하는 것이 더 나쁘다). 그 선을 여기 적어 둔다.
+          dep=$(npm view "@metadium-did/platform-agent-js@$expected" deprecated 2>/dev/null || true)
+          if [ -n "$dep" ]; then
+            echo "🔴 npm 에서 **deprecate 된 판**을 릴리스하려 한다: $expected"
+            echo "   사유: $dep"
+            exit 1
+          fi
           test "$tag" = "v$expected" || {
             echo "🔴 태그($tag)와 package.json(v$expected)이 다르다 — 잘못된 커밋에 태그가 붙었다"; exit 1; }
           # 🔴 **레포 안에서 돌리면 안 된다.** `dist-bin/../package.json` 이 실재해서
