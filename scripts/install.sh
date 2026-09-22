@@ -95,7 +95,19 @@ ACTUAL="$(shasum -a 256 "$TMP/metapass-agent" 2>/dev/null | cut -d' ' -f1 || sha
 [ "$EXPECTED" = "$ACTUAL" ] || { echo "오류(fail-closed): 체크섬 불일치"; state_now; exit 1; }
 
 mkdir -p "$DEST"
-install -m 0755 "$TMP/metapass-agent" "$DEST/metapass-agent"
+# 🔴 **덮어쓰다 죽으면 옛 판이 깨진다** — 그러면 「최신도 아니고 옛 판도 아닌」 상태가 남는다.
+#    briefick 이 linux 에서 실측: `ulimit -f` 로 중간에 끊으니 대상이 27B → 1,048,576B 가 됐다.
+# ⚠️ 플랫폼에 따라 다르다(제 실측):
+#      BSD install(macOS)  임시 파일에 쓰고 rename — 대상은 **무사**하나 **잔재가 남는다**
+#      직접 쓰기(GNU 계열)  대상을 잘라 쓰므로 **깨진다**
+#    ⇒ `install` 의 구현에 기대지 않는다. **같은 디렉터리 임시 이름 → `mv`** 로 못박는다.
+#      같은 파일시스템이라 `mv` 는 `rename(2)` 이고 **원자적**이다 — 성공 아니면 옛 판 그대로다.
+# ⚠️ **변수·함수 이름은 ASCII 여야 한다.** 한글 이름은 POSIX `sh` 가 거부하는데
+#    `sh -n` 은 **통과시킨다**(문법상 유효한 명령 호출로 읽힌다). 실행해야 잡힌다.
+_staged="$DEST/.metapass-agent.new.$$"
+trap 'rm -f "$_staged"' EXIT INT TERM
+install -m 0755 "$TMP/metapass-agent" "$_staged"
+mv -f "$_staged" "$DEST/metapass-agent"
 echo "✅ 설치: $DEST/metapass-agent ($VERSION, 서명 검증됨)"
 if [ "$HAD_OLD" = 1 ]; then
   cat <<'NOTE'
