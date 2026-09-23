@@ -105,6 +105,32 @@ claude mcp add --transport http briefick http://127.0.0.1:8787/mcp
   resident. On first run it retrieves the delegation VC (after wallet approval) and saves it to
   `~/.metapass-agent/key.json`, so a restart does not need approval again.
 
+## Install the CLI (single binary)
+
+`install.sh` downloads the signed binary for your platform, verifies it against the release
+signing key below, and installs it to `~/.metapass-agent/bin` (override with
+`METAPASS_AGENT_BIN_DIR`). Pin a release with `METAPASS_AGENT_VERSION=v0.5.4`.
+
+This repository is **private**, so the unauthenticated `raw.githubusercontent.com` URL returns
+404. Use an authenticated path - a logged-in [GitHub CLI](https://cli.github.com) covers both:
+
+```sh
+# From main
+gh api repos/METADIUM/platform-agent-js/contents/scripts/install.sh \
+   -H "Accept: application/vnd.github.raw" > install.sh && sh install.sh
+
+# Or from the latest release's assets
+gh release download -R METADIUM/platform-agent-js --pattern install.sh -O install.sh && sh install.sh
+```
+
+The installer requires `minisign`, and refuses to install without it rather than falling back to
+an unsigned channel. Without `gh`, the script falls back to anonymous `curl`, which also needs
+`python3` - but anonymous access cannot reach a private repository, so `gh` is the supported path
+here.
+
+Every refusal states **what state you are now in**: whether nothing was installed, or whether a
+previous version is still in place and still running.
+
 ## Install (as a library)
 
 ```bash
