@@ -811,13 +811,24 @@ function fail(msg: string): number {
  *    `bin/cli.mjs` 는 안 실린다. 그런데 아래 비교가 **`argv[1]` 을 cwd 기준으로** 풀어서,
  *    **이름으로 부르면 아무것도 안 하고 조용히 exit 0** 이었다.
  *
- * 실측 2026-09-23 (pmvm-02, 설치형 0.5.2 · PATH 등록됨):
+ * 🔴 **실패 조건은 둘이 동시에 성립할 때 하나뿐이다**(metapass-saas 가 좁혔다):
  * ```
- * cd ~/.metapass-agent/bin && ./metapass-agent --version   0.5.2     argv[1] 이 cwd 기준으로 맞는다
- * cd ~/.metapass-agent/bin && metapass-agent   --version   0.5.2     같은 이유로 맞는다
- * cd /tmp                  && /전체/경로       --version   0.5.2
- * cd /tmp                  && metapass-agent   --version   **빈 출력 · exit 0**   ← 사용자가 겪은 것
+ * argv[1] 에 경로 구분자가 **없다**   그리고   cwd 가 **bin 이 아니다**
  * ```
+ * `pathToFileURL("metapass-agent")` 가 `<cwd>/metapass-agent` 로 풀리므로,
+ * **cwd 가 bin 이면 우연히 일치**해서 산다. ⇒ *"이름으로 부르면 깨진다"* 는 **과대 서술**이다.
+ *
+ * 실측 2026-09-23 (darwin-arm64 · linux-x64 · 설치형 0.5.2, 세 세션 · 세 머신):
+ * ```
+ * 다른 cwd · 절대경로                       0.5.2
+ * 홈      · `.metapass-agent/bin/…`         0.5.2   ← **구분자 있는 상대경로도 산다**
+ * 다른 cwd · `../../…/metapass-agent`       0.5.2
+ * bin     · `./metapass-agent`              0.5.2
+ * bin     · `metapass-agent`(구분자 없음)   0.5.2   ← cwd 가 bin 이라 산다
+ * **다른 cwd · `metapass-agent`(구분자 없음)  빈 출력 · exit 0**   ← 유일한 실패. PATH 사용법
+ * ```
+ * ⚠️ 그리고 그때 **`#5` 의 거부망이 통째로 우회**된다 — `zzz-nosuch` 조차 0바이트 · exit 0 이라
+ *    `cmd || echo fail` 도 안 터진다(metapass-saas 지적).
  * ⚠️ **PATH 에 넣고 이름으로 부르는 것이 정상 사용법**인데 그게 안 됐다. 못 잡은 이유는
  *    우리 측정이 전부 **전체 경로**였기 때문이다 — `install.sh` 출력·화면 안내·다른 세션의
  *    검증이 모두 `$DEST/metapass-agent` 꼴이었다. **재는 자리가 사용자의 자리와 달랐다.**
