@@ -91,9 +91,32 @@ _cleanup() { rm -rf "$TMP"; [ -n "$_staged" ] && rm -f "$_staged"; return 0; }
 trap _cleanup EXIT
 trap '_cleanup; exit 130' INT
 trap '_cleanup; exit 143' TERM
+# 🔴 **두 갈래 중 `gh` 쪽에만 실패 핸들러가 없었다.** `set -e` 로 죽기는 하는데
+#    `state_now` 가 **안 돌아** 사용자는 한 줄짜리 원인만 보고 **「지금 어떤 상태인가」를 못 받는다**.
+# ⚠️ 이 결함이 실제로 났다(2026-09-23): `v0.5.3` 을 자른 직후 GitHub 의 **읽기 캐시 불일치**로
+#    `releases/tags/v0.5.3` 이 자산 0 을 돌려줬고(`by-id`·`latest` 는 7), `gh release download` 가
+#    *"no assets to download"* 만 찍고 끝났다. 자산은 **있는데** 그 경로만 못 본 것이다.
+# 📌 왜 `#10` 에서 못 잡았나 — 실패를 **두 번** 주입했는데 **`FETCH` 열이 하나**였다
+#    (minisign 부재 = fetch 이전 · curl 실패 = curl 갈래). **행은 둘인데 열이 하나**였다
+#    (metapass-saas 자기 진단). ⇒ 갈래가 둘이면 **갈래마다** 실패를 넣어 본다.
 fetch() {
-  if [ "$FETCH" = gh ]; then gh release download "$VERSION" -R "$REPO" -p "$1" -O "$2" --clobber
-  else curl -fsSL "$BASE/$1" -o "$2" || { echo "오류: $1 다운로드 실패 — 비공개 레포면 gh CLI 설치·로그인 후 재실행"; state_now; exit 1; }
+  if [ "$FETCH" = gh ]; then
+    gh release download "$VERSION" -R "$REPO" -p "$1" -O "$2" --clobber || {
+      echo "오류: $1 을 $VERSION 에서 받지 못했습니다."
+      echo "  gh 로 받는 중입니다 — 로그인(\`gh auth login\`)과 그 릴리스에 **자산이 있는지**를 보십시오:"
+      echo "    gh release view $VERSION -R $REPO"
+      echo "  ⚠️ 자산이 있는데도 «no assets to download» 가 나오면 GitHub 쪽 목록이 **일시적으로"
+      echo "     낡은** 것일 수 있습니다. 그때는 판을 고정해 우회합니다:"
+      echo "    METAPASS_AGENT_VERSION=<이전 태그> sh install.sh"
+      state_now
+      exit 1
+    }
+  else
+    curl -fsSL "$BASE/$1" -o "$2" || {
+      echo "오류: $1 다운로드 실패 — 비공개 레포면 gh CLI 설치·로그인 후 재실행"
+      state_now
+      exit 1
+    }
   fi
 }
 echo "↓ $VERSION ($TARGET, via $FETCH)"
