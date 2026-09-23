@@ -10,6 +10,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { AgentKey } from "./key.js";
 import { AgentClientError, BriefickAgentClient, isRequestExpired } from "./briefick.js";
@@ -805,9 +806,35 @@ function fail(msg: string): number {
   return 1;
 }
 
+/**
+ * 🔴 **SEA(단일 실행 파일)에서는 이 가드가 유일한 진입점이다** — 번들의 entry 가 이 파일이고
+ *    `bin/cli.mjs` 는 안 실린다. 그런데 아래 비교가 **`argv[1]` 을 cwd 기준으로** 풀어서,
+ *    **이름으로 부르면 아무것도 안 하고 조용히 exit 0** 이었다.
+ *
+ * 실측 2026-09-23 (pmvm-02, 설치형 0.5.2 · PATH 등록됨):
+ * ```
+ * cd ~/.metapass-agent/bin && ./metapass-agent --version   0.5.2     argv[1] 이 cwd 기준으로 맞는다
+ * cd ~/.metapass-agent/bin && metapass-agent   --version   0.5.2     같은 이유로 맞는다
+ * cd /tmp                  && /전체/경로       --version   0.5.2
+ * cd /tmp                  && metapass-agent   --version   **빈 출력 · exit 0**   ← 사용자가 겪은 것
+ * ```
+ * ⚠️ **PATH 에 넣고 이름으로 부르는 것이 정상 사용법**인데 그게 안 됐다. 못 잡은 이유는
+ *    우리 측정이 전부 **전체 경로**였기 때문이다 — `install.sh` 출력·화면 안내·다른 세션의
+ *    검증이 모두 `$DEST/metapass-agent` 꼴이었다. **재는 자리가 사용자의 자리와 달랐다.**
+ * ⇒ SEA 이면 argv 와 무관하게 **항상 돈다.** npm 경로는 `bin/cli.mjs` 가 부르므로 영향 없다.
+ */
+function isSeaBinary(): boolean {
+  try {
+    const req = createRequire(import.meta.url);
+    return (req("node:sea") as { isSea?: () => boolean }).isSea?.() === true;
+  } catch {
+    return false;
+  }
+}
+
 // `node dist/cli.js` 직접 실행 지원(bin/cli.mjs와 동일 동작) — 이전엔 무동작 exit 0이라 디버깅에 혼란.
 const directEntry = process.argv[1];
-if (directEntry && import.meta.url === pathToFileURL(directEntry).href) {
+if (isSeaBinary() || (directEntry && import.meta.url === pathToFileURL(directEntry).href)) {
   main(process.argv.slice(2))
     .then((code) => process.exit(code ?? 0))
     .catch((e) => {

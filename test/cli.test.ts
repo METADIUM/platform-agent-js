@@ -517,3 +517,33 @@ describe("src/ 전체의 문자열에 범위 스펙이 없다", () => {
     expect(out.join("\n")).not.toMatch(/@[\^~]\d/);
   });
 });
+
+/**
+ * 🔴 **SEA 에서는 진입 가드가 유일한 시작점이고, 그게 `argv[1]` 을 cwd 기준으로 풀었다.**
+ *
+ * 실측 2026-09-23 (pmvm-02 · 설치형 0.5.2 · PATH 등록됨):
+ * ```
+ * cd <bin> && metapass-agent --version   0.5.2
+ * cd /tmp  && <전체경로>     --version   0.5.2
+ * cd /tmp  && metapass-agent --version   **빈 출력 · exit 0**   ← 정상 사용법이 안 됐다
+ * ```
+ * ⚠️ 못 잡은 이유: 우리 측정이 전부 **전체 경로**였다(`install.sh` 출력·화면 안내·다른 세션 검증).
+ *    ⇒ **재는 자리가 사용자의 자리와 달랐다.**
+ *
+ * 📌 이 검사는 **선언**만 잰다 — 「SEA 면 항상 돈다」가 소스에 있는가. 「실제로 도는가」는
+ *    SEA 를 빌드해 **빈 디렉터리에서 이름으로** 불러야 알고, 그건 `release-binaries.yml` 의
+ *    게이트가 할 일이다(아래 검사와 짝).
+ */
+describe("SEA 진입 가드는 argv 에 기대지 않는다", () => {
+  const src = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
+
+  it("SEA 면 argv 와 무관하게 main 을 부른다", () => {
+    expect(src).toContain("isSeaBinary()");
+    // 가드가 `isSeaBinary() ||` 로 시작해야 argv 조건이 **그것을 못 막는다**
+    expect(src).toMatch(/if \(isSeaBinary\(\) \|\|/);
+  });
+
+  it("node:sea 로 판정한다 — 경로 비교로 흉내 내지 않는다", () => {
+    expect(src).toContain('req("node:sea")');
+  });
+});
