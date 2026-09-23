@@ -77,7 +77,20 @@ command -v minisign >/dev/null || {
   exit 1; }
 
 BASE="https://github.com/$REPO/releases/download/$VERSION"
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+# 🔴 **`trap` 은 같은 신호에 누적이 아니라 교체다.** 종전에는 여기서 `$TMP` 를 걸고
+#    아래(설치 직전)에서 `_staged` 를 또 걸어 **이 줄이 통째로 덮였다** — 설치 한 번마다
+#    `$TMP` 가 통째로 남았고 그 안에 바이너리 **119MB** 가 들어 있다(briefick 실측).
+#    ⚠️ 이 스크립트는 **다시 실행하도록 안내되는** 것이라(갈아끼우기·복구) **누적된다.**
+#    `/tmp` 가 tmpfs 면 메모리다.
+# 📌 「중단 시 상태를 말한다」를 넣으면서 **정상 종료의 뒷정리를 잃었다** — 새 안전장치가
+#    있던 것을 지웠다. ⇒ 치울 것을 **한 함수**로 모으고 `trap` 은 **한 번만** 건다.
+# ⚠️ macOS `sh`·`bash`·`zsh`, linux `sh`·`bash`·`dash` 전부 교체다(양쪽 실측).
+_staged=""
+TMP="$(mktemp -d)"
+_cleanup() { rm -rf "$TMP"; [ -n "$_staged" ] && rm -f "$_staged"; return 0; }
+trap _cleanup EXIT
+trap '_cleanup; exit 130' INT
+trap '_cleanup; exit 143' TERM
 fetch() {
   if [ "$FETCH" = gh ]; then gh release download "$VERSION" -R "$REPO" -p "$1" -O "$2" --clobber
   else curl -fsSL "$BASE/$1" -o "$2" || { echo "오류: $1 다운로드 실패 — 비공개 레포면 gh CLI 설치·로그인 후 재실행"; state_now; exit 1; }
@@ -104,8 +117,7 @@ mkdir -p "$DEST"
 #      같은 파일시스템이라 `mv` 는 `rename(2)` 이고 **원자적**이다 — 성공 아니면 옛 판 그대로다.
 # ⚠️ **변수·함수 이름은 ASCII 여야 한다.** 한글 이름은 POSIX `sh` 가 거부하는데
 #    `sh -n` 은 **통과시킨다**(문법상 유효한 명령 호출로 읽힌다). 실행해야 잡힌다.
-_staged="$DEST/.metapass-agent.new.$$"
-trap 'rm -f "$_staged"' EXIT INT TERM
+_staged="$DEST/.metapass-agent.new.$$"   # 위 `_cleanup` 이 치운다 — 여기서 trap 을 다시 걸지 않는다
 install -m 0755 "$TMP/metapass-agent" "$_staged"
 mv -f "$_staged" "$DEST/metapass-agent"
 echo "✅ 설치: $DEST/metapass-agent ($VERSION, 서명 검증됨)"
