@@ -74,12 +74,38 @@ if command -v gh >/dev/null 2>&1; then
   fi
 else
   FETCH=curl
+  # 🔴 **여기서 먼저 말한다.** 종전엔 `python3` 이 없으면 `REL_ID` 가 조용히 비어
+  #    *"릴리스 id 를 못 찾았습니다"* 로 떨어졌고, 그러면 **python3 부재인지 태그 오타인지
+  #    구분이 안 됐다**(metapass-saas). `minisign` 을 다루는 그 모양 그대로 앞에서 거부한다.
+  command -v python3 >/dev/null 2>&1 || {
+    echo "오류: python3 이 없습니다."
+    echo "  gh CLI 가 없어 익명 curl 로 받는 중인데, 이 경로는 릴리스 JSON 을 읽는 데 python3 을 씁니다."
+    echo "  ⇒ **gh CLI 를 설치·로그인**하시거나(권장, 비공개 레포에도 됩니다) python3 을 설치하십시오."
+    state_now
+    exit 1
+  }
+  # 🔴 **여기도 실패 핸들러가 없었다.** `gh` 갈래만 고치고 이쪽을 뺐더니(=`#10` 에서 지적받은
+  #    그 결함의 **반대쪽 열**), `set -e` 가 **curl 의 상태(56·22)로 그냥 죽어** 사용자는
+  #    raw curl 오류만 보고 `state_now` 를 **못 받았다**(실측: exit=56, 안내 0줄).
+  #    ⚠️ 명령치환 실패는 `[ -n "$VERSION" ]` 가드에 **도달하기 전에** 죽는다 — 가드가 있어도 소용없다.
+  _api() {   # $1=경로 · 실패하면 그 자리에서 말하고 끝낸다
+    curl -fsSL "https://api.github.com/repos/$REPO/$1" || {
+      # 🔴 **stderr 로 보낸다.** 이 함수는 `REL_ID="$(_api …)"` 처럼 **명령치환 안에서** 불린다 —
+      #    stdout 으로 쓰면 안내가 **변수로 빨려 들어가 사용자에게 한 줄도 안 보인다**(실측:
+      #    curl 자신의 오류만 나오고 안내 3줄이 전부 사라졌다).
+      #    ⚠️ 같은 이유로 `exit 1` 은 **서브셸만** 끝낸다 — 바깥은 `set -e` 가 치환 상태로 멈춘다.
+      { echo "오류: GitHub API 를 읽지 못했습니다 ($1, 익명 curl)."
+        echo "  **비공개 레포는 익명 접근이 404 입니다.** ⇒ gh CLI 를 설치하고 로그인하십시오: gh auth login"
+        state_now
+      } >&2
+      exit 1
+    }
+  }
   if [ -n "${METAPASS_AGENT_VERSION:-}" ]; then
     VERSION="$METAPASS_AGENT_VERSION"
-    REL_ID="$(curl -fsSL "https://api.github.com/repos/$REPO/releases" \
-              | TAG="$VERSION" _json_pick "next((r['id'] for r in d if r['tag_name']==os.environ['TAG']),'')")"
+    REL_ID="$(_api releases | TAG="$VERSION" _json_pick "next((r['id'] for r in d if r['tag_name']==os.environ['TAG']),'')")"
   else
-    _rel="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")"
+    _rel="$(_api releases/latest)"
     REL_ID="$(printf '%s' "$_rel" | _json_pick "d['id']")"
     VERSION="$(printf '%s' "$_rel" | _json_pick "d['tag_name']")"
   fi
@@ -89,6 +115,23 @@ fi
   echo "오류: 릴리스 \`$VERSION\` 의 id 를 못 찾았습니다."
   echo "  태그가 있는지 보십시오: gh release view $VERSION -R $REPO"
   state_now; exit 1; }
+
+# 🔴 **id 를 믿지 않고 확인한다**(metapass-saas). 위에서 id 를 얻은 응답은 **같은 응답 안에서도
+#    자산 목록이 틀린** 것이었다 — 그 응답의 다른 필드만 믿는 것은 불편한 판단이다.
+#    ⚠️ 그리고 id 가 틀리면 **엉뚱한 릴리스를 조용히 설치**한다(자산 이름만 맞으면 통과한다).
+#    ⇒ id 로 다시 조회해 `tag_name` 이 우리가 고른 판과 같은지 **대조**한다.
+if [ "$FETCH" = gh ]; then
+  _tag_check="$(gh api "repos/$REPO/releases/$REL_ID" --jq .tag_name 2>/dev/null)"
+else
+  _tag_check="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/$REL_ID" | _json_pick "d['tag_name']" || true)"
+fi
+[ "$_tag_check" = "$VERSION" ] || {
+  echo "오류: 릴리스 id 가 가리키는 판이 다릅니다."
+  echo "  고른 판: $VERSION · id $REL_ID 가 가리키는 판: ${_tag_check:-(못 읽음)}"
+  echo "  ⇒ 엉뚱한 릴리스를 설치할 뻔했습니다. 태그를 확인하고 다시 실행하십시오."
+  state_now
+  exit 1
+}
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET=darwin-arm64 ;;
