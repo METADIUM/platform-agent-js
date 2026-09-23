@@ -10,6 +10,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { AgentKey } from "./key.js";
 import { AgentClientError, BriefickAgentClient, isRequestExpired } from "./briefick.js";
@@ -805,9 +806,52 @@ function fail(msg: string): number {
   return 1;
 }
 
+/**
+ * 🔴 **SEA(단일 실행 파일)에서는 이 가드가 유일한 진입점이다** — 번들의 entry 가 이 파일이고
+ *    `bin/cli.mjs` 는 안 실린다. 그런데 아래 비교가 **`argv[1]` 을 cwd 기준으로** 풀어서,
+ *    **이름으로 부르면 아무것도 안 하고 조용히 exit 0** 이었다.
+ *
+ * 🔴 **실패 조건은 둘이 동시에 성립할 때 하나뿐이다**(metapass-saas 가 좁혔다):
+ * ```
+ * argv[1] 에 경로 구분자가 **없다**   그리고   cwd 가 **bin 이 아니다**
+ * ```
+ * `pathToFileURL("metapass-agent")` 가 `<cwd>/metapass-agent` 로 풀리므로,
+ * **cwd 가 bin 이면 우연히 일치**해서 산다. ⇒ *"이름으로 부르면 깨진다"* 는 **과대 서술**이다.
+ *
+ * 실측 2026-09-23 (darwin-arm64 · linux-x64 · 설치형 0.5.2, 세 세션 · 세 머신):
+ * ```
+ * 다른 cwd · 절대경로                       0.5.2
+ * 홈      · `.metapass-agent/bin/…`         0.5.2   ← **구분자 있는 상대경로도 산다**
+ * 다른 cwd · `../../…/metapass-agent`       0.5.2
+ * bin     · `./metapass-agent`              0.5.2
+ * bin     · `metapass-agent`(구분자 없음)   0.5.2   ← cwd 가 bin 이라 산다
+ * **다른 cwd · `metapass-agent`(구분자 없음)  빈 출력 · exit 0**   ← 유일한 실패. PATH 사용법
+ * ```
+ * ⚠️ 그리고 그때 **`#5` 의 거부망이 통째로 우회**된다 — `zzz-nosuch` 조차 0바이트 · exit 0 이라
+ *    `cmd || echo fail` 도 안 터진다(metapass-saas 지적).
+ * ⚠️ **PATH 에 넣고 이름으로 부르는 것이 정상 사용법**인데 그게 안 됐다. 못 잡은 이유는
+ *    우리 측정이 전부 **전체 경로**였기 때문이다 — `install.sh` 출력·화면 안내·다른 세션의
+ *    검증이 모두 `$DEST/metapass-agent` 꼴이었다. **재는 자리가 사용자의 자리와 달랐다.**
+ * ⇒ SEA 이면 argv 와 무관하게 **항상 돈다.** npm 경로는 `bin/cli.mjs` 가 부르므로 영향 없다.
+ *
+ * ⚠️ **`node:sea` 는 Node 22+ 인데 `engines` 는 `>=18` 이다.** 실질 위험은 없다 —
+ *    npm 경로는 이 가드를 안 타고(`bin/cli.mjs` 가 직접 `main` 을 부른다), SEA 는 **빌드 Node**가
+ *    정한다(`build-sea.mjs` 가 개발 Node 를 그대로 쓴다). 못 부르면 `catch` 로 **옛 동작**이라
+ *    더 나빠지지도 않는다. ⇒ 읽는 사람이 «18 에서도 이 분기가 산다» 로 읽지 않게 적어 둔다
+ *    (metapass-saas 지적).
+ */
+function isSeaBinary(): boolean {
+  try {
+    const req = createRequire(import.meta.url);
+    return (req("node:sea") as { isSea?: () => boolean }).isSea?.() === true;
+  } catch {
+    return false;
+  }
+}
+
 // `node dist/cli.js` 직접 실행 지원(bin/cli.mjs와 동일 동작) — 이전엔 무동작 exit 0이라 디버깅에 혼란.
 const directEntry = process.argv[1];
-if (directEntry && import.meta.url === pathToFileURL(directEntry).href) {
+if (isSeaBinary() || (directEntry && import.meta.url === pathToFileURL(directEntry).href)) {
   main(process.argv.slice(2))
     .then((code) => process.exit(code ?? 0))
     .catch((e) => {
