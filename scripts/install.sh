@@ -39,15 +39,56 @@ state_now() {   # 중단 시 «지금 상태» — 함수명은 **ASCII**여야 
 #    한다. 릴리스만 받은 사람이 대조할 곳이 릴리스 안뿐이면 자산 손상만 막고 위조는 못 막는다.
 MINISIGN_PUB="RWT8kUm/J8uyqoOFON5wRNBUCOUtn4+nX0YeyYMItdo2J6iVNYd4uUAX"
 
+# 🔴 **태그 조회 경로를 안 쓴다**(2026-09-23 실측). `releases/tags/<tag>` 는 자산 목록이
+#    **복제본마다 다르게** 나왔다 — 같은 순간에 30회 중 4회만 7개이고 나머지는 **0개**였다.
+#    `gh release view`·`gh release download` 가 그 경로를 쓰므로 설치가 **약 87% 실패**했다.
+#    ⚠️ 자산은 **있었다**(재업로드가 `422 already exists`). 쓰기가 아니라 **읽기**가 갈렸다.
+# 🟢 안정적인 것으로 확인된 셋만 쓴다 (각 10회 전수 일치):
+# ```
+# releases/latest        10/10   ← 판을 안 고정했을 때
+# releases (목록)의 id    10/10   ← 판을 고정했을 때 태그→id
+# releases/<id>/assets   10/10   ← 자산 목록·다운로드 URL
+# ```
+# ⇒ **태그로 자산을 찾지 않는다. 릴리스 id 로 찾는다.**
+# 비공개 레포 지원: gh CLI(인증)가 있으면 그것으로, 없으면 익명 curl(공개 레포 전용).
+# 릴리스 JSON 에서 한 값 뽑기 — `python3` 이 있으면 그것으로, 없으면 grep 폴백.
+_json_pick() {   # $1=파이썬 표현식(d 가 파싱된 값)  · stdin=JSON
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import json,sys,os;d=json.load(sys.stdin);print($1)" 2>/dev/null
+  else
+    cat >/dev/null; echo ""
+  fi
+}
+
 # 비공개 레포 지원: gh CLI(인증)가 있으면 그것으로, 없으면 익명 curl(공개 레포 전용).
 if command -v gh >/dev/null 2>&1; then
   FETCH=gh
-  VERSION="${METAPASS_AGENT_VERSION:-$(gh release view -R "$REPO" --json tagName -q .tagName)}"
+  if [ -n "${METAPASS_AGENT_VERSION:-}" ]; then
+    VERSION="$METAPASS_AGENT_VERSION"
+    REL_ID="$(gh api "repos/$REPO/releases" --paginate \
+              --jq ".[]|select(.tag_name==\"$VERSION\")|.id" 2>/dev/null | head -1)"
+  else
+    _rel="$(gh api "repos/$REPO/releases/latest" 2>/dev/null)"
+    REL_ID="$(printf '%s' "$_rel" | _json_pick "d['id']")"
+    VERSION="$(printf '%s' "$_rel" | _json_pick "d['tag_name']")"
+  fi
 else
   FETCH=curl
-  VERSION="${METAPASS_AGENT_VERSION:-$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)}"
+  if [ -n "${METAPASS_AGENT_VERSION:-}" ]; then
+    VERSION="$METAPASS_AGENT_VERSION"
+    REL_ID="$(curl -fsSL "https://api.github.com/repos/$REPO/releases" \
+              | TAG="$VERSION" _json_pick "next((r['id'] for r in d if r['tag_name']==os.environ['TAG']),'')")"
+  else
+    _rel="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")"
+    REL_ID="$(printf '%s' "$_rel" | _json_pick "d['id']")"
+    VERSION="$(printf '%s' "$_rel" | _json_pick "d['tag_name']")"
+  fi
 fi
 [ -n "$VERSION" ] || { echo "오류: 최신 릴리스를 찾지 못했습니다 (비공개 레포는 gh CLI 로그인 필요: gh auth login)"; state_now; exit 1; }
+[ -n "${REL_ID:-}" ] || {
+  echo "오류: 릴리스 \`$VERSION\` 의 id 를 못 찾았습니다."
+  echo "  태그가 있는지 보십시오: gh release view $VERSION -R $REPO"
+  state_now; exit 1; }
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET=darwin-arm64 ;;
@@ -99,25 +140,38 @@ trap '_cleanup; exit 143' TERM
 # 📌 왜 `#10` 에서 못 잡았나 — 실패를 **두 번** 주입했는데 **`FETCH` 열이 하나**였다
 #    (minisign 부재 = fetch 이전 · curl 실패 = curl 갈래). **행은 둘인데 열이 하나**였다
 #    (metapass-saas 자기 진단). ⇒ 갈래가 둘이면 **갈래마다** 실패를 넣어 본다.
+# 자산 하나를 받는다. $1=자산 이름 · $2=받을 경로
+# 🔴 **태그 경로(`gh release download`)를 안 쓴다** — 위 주석의 그 불안정한 자리다.
+#    릴리스 id 로 자산 URL 을 얻어 **그 URL 을 직접** 받는다.
 fetch() {
+  _name="$1"; _dest="$2"; _u=""
   if [ "$FETCH" = gh ]; then
-    gh release download "$VERSION" -R "$REPO" -p "$1" -O "$2" --clobber || {
-      echo "오류: $1 을 $VERSION 에서 받지 못했습니다."
-      echo "  gh 로 받는 중입니다 — 로그인(\`gh auth login\`)과 그 릴리스에 **자산이 있는지**를 보십시오:"
-      echo "    gh release view $VERSION -R $REPO"
-      echo "  ⚠️ 자산이 있는데도 «no assets to download» 가 나오면 GitHub 쪽 목록이 **일시적으로"
-      echo "     낡은** 것일 수 있습니다. 그때는 판을 고정해 우회합니다:"
-      echo "    METAPASS_AGENT_VERSION=<이전 태그> sh install.sh"
-      state_now
-      exit 1
-    }
+    _u="$(gh api "repos/$REPO/releases/$REL_ID/assets" \
+          --jq ".[]|select(.name==\"$_name\")|.url" 2>/dev/null | head -1)"
+    [ -n "$_u" ] && gh api "$_u" -H "Accept: application/octet-stream" > "$_dest" 2>/dev/null
   else
-    curl -fsSL "$BASE/$1" -o "$2" || {
-      echo "오류: $1 다운로드 실패 — 비공개 레포면 gh CLI 설치·로그인 후 재실행"
-      state_now
-      exit 1
-    }
-  fi
+    ASSET_NAME="$_name"; export ASSET_NAME
+    _u="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/$REL_ID/assets" \
+          | _json_pick "next((a['url'] for a in d if a['name']==os.environ['ASSET_NAME']),'')")"
+    [ -n "$_u" ] && curl -fsSL -H "Accept: application/octet-stream" "$_u" -o "$_dest"
+  fi || {
+    echo "오류: $_name 을 $VERSION 에서 받지 못했습니다."
+    if [ "$FETCH" = gh ]; then
+      echo "  gh 로 받는 중입니다 — 로그인(\`gh auth login\`)과 그 릴리스에 **자산이 있는지**를 보십시오:"
+      echo "    gh api repos/$REPO/releases/$REL_ID/assets --jq '.[].name'"
+    else
+      echo "  익명 curl 로 받는 중입니다 — **비공개 레포면 받을 수 없습니다.** gh CLI 를 설치·로그인하십시오."
+    fi
+    echo "  ⚠️ 자산이 분명히 있는데도 실패하면 판을 고정해 우회합니다:"
+    echo "    METAPASS_AGENT_VERSION=<이전 태그> sh install.sh"
+    state_now
+    exit 1
+  }
+  [ -s "$_dest" ] || {
+    echo "오류: $_name 을 받았는데 **비어 있습니다**."
+    state_now
+    exit 1
+  }
 }
 echo "↓ $VERSION ($TARGET, via $FETCH)"
 fetch "metapass-agent-$TARGET" "$TMP/metapass-agent"
