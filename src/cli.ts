@@ -822,6 +822,12 @@ function fail(msg: string): number {
  *    우리 측정이 전부 **전체 경로**였기 때문이다 — `install.sh` 출력·화면 안내·다른 세션의
  *    검증이 모두 `$DEST/metapass-agent` 꼴이었다. **재는 자리가 사용자의 자리와 달랐다.**
  * ⇒ SEA 이면 argv 와 무관하게 **항상 돈다.** npm 경로는 `bin/cli.mjs` 가 부르므로 영향 없다.
+ *
+ * ⚠️ **`node:sea` 는 Node 22+ 인데 `engines` 는 `>=18` 이다.** 실질 위험은 없다 —
+ *    npm 경로는 이 가드를 안 타고(`bin/cli.mjs` 가 직접 `main` 을 부른다), SEA 는 **빌드 Node**가
+ *    정한다(`build-sea.mjs` 가 개발 Node 를 그대로 쓴다). 못 부르면 `catch` 로 **옛 동작**이라
+ *    더 나빠지지도 않는다. ⇒ 읽는 사람이 «18 에서도 이 분기가 산다» 로 읽지 않게 적어 둔다
+ *    (metapass-saas 지적).
  */
 function isSeaBinary(): boolean {
   try {
