@@ -109,7 +109,7 @@ claude mcp add --transport http briefick http://127.0.0.1:8787/mcp
 
 `install.sh` downloads the signed binary for your platform, verifies it against the release
 signing key below, and installs it to `~/.metapass-agent/bin` (override with
-`METAPASS_AGENT_BIN_DIR`). Pin a release with `METAPASS_AGENT_VERSION=v0.5.4`.
+`METAPASS_AGENT_BIN_DIR`). Pin a release with `METAPASS_AGENT_VERSION=v0.5.5`.
 
 This repository is **private**, so the unauthenticated `raw.githubusercontent.com` URL returns
 404. Use an authenticated path - a logged-in [GitHub CLI](https://cli.github.com) covers both:
