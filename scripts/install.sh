@@ -223,9 +223,44 @@ fetch "SHA256SUMS.minisig" "$TMP/SHA256SUMS.minisig"
 
 # 1) 체크섬 파일 서명 검증 → 2) 바이너리 체크섬 대조 (둘 다 통과해야 설치)
 minisign -Vm "$TMP/SHA256SUMS" -P "$MINISIGN_PUB" -x "$TMP/SHA256SUMS.minisig" >/dev/null
+# 🔴 **`a | b || c` 의 `||` 는 `a` 가 아니라 «파이프라인»(= `b`)의 상태를 본다.**
+#    종전 한 줄: `shasum -a 256 f 2>/dev/null | cut -d' ' -f1 || sha256sum f | cut -d' ' -f1`
+#    `shasum` 이 **없으면** 그 자리가 비고, `cut` 은 빈 입력으로 **성공(0)** 하므로 `||` 뒤의
+#    폴백이 **영영 안 돈다.** `ACTUAL` 이 빈 문자열이 되어 대조가 깨진다.
+#    ⚠️ 그리고 그때 나오는 말이 **"체크섬 불일치"** 였다 — 즉 **「해시 도구가 없다」와
+#    「받은 바이너리가 바뀌었다」가 똑같은 화면**이었다. 무결성 검사의 실패 모드로는 최악이다.
+#    실측 2026-09-28, Rocky Linux 10.2: `shasum` 없음 · `sha256sum` 있음 → 설치 100% 실패.
+#    📌 이 줄은 **어느 시험도 안 돌려 봤다** — install.sh 를 실행하는 시험이 하나도 없었다.
+# sha256_of FILE — 해시를 stdout 으로. 도구가 없으면 «그렇게 말하고» 끝낸다.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  else
+    { echo "오류: SHA-256 을 계산할 도구가 없습니다 (\`sha256sum\` 도 \`shasum\` 도)."
+      echo "  이것은 **무결성 검사 실패가 아닙니다** — 검사를 **할 수가 없었던** 것입니다."
+      echo "  ⇒ coreutils 를 설치하십시오:  dnf install -y coreutils   (또는 apt install coreutils)"
+    } >&2
+    return 1
+  fi
+}
+
 EXPECTED="$(grep " metapass-agent-$TARGET\$" "$TMP/SHA256SUMS" | cut -d' ' -f1)"
-ACTUAL="$(shasum -a 256 "$TMP/metapass-agent" 2>/dev/null | cut -d' ' -f1 || sha256sum "$TMP/metapass-agent" | cut -d' ' -f1)"
-[ "$EXPECTED" = "$ACTUAL" ] || { echo "오류(fail-closed): 체크섬 불일치"; state_now; exit 1; }
+# 🔴 같은 모양의 둘째 구멍: `grep` 이 못 찾으면 `EXPECTED` 가 비고, 그래도 아래 대조가
+#    **"체크섬 불일치"** 로 떨어진다. 「이 플랫폼 줄이 SHA256SUMS 에 없다」와 구분이 안 된다.
+[ -n "$EXPECTED" ] || {
+  echo "오류: SHA256SUMS 에 \`metapass-agent-$TARGET\` 줄이 없습니다."
+  echo "  받은 판($VERSION)이 이 플랫폼을 안 내놓았거나, 자산이 잘못 올라간 것입니다."
+  echo "  들어 있는 것:"; sed 's/^/    /' "$TMP/SHA256SUMS"
+  state_now; exit 1; }
+
+ACTUAL="$(sha256_of "$TMP/metapass-agent")" || { state_now; exit 1; }
+[ "$EXPECTED" = "$ACTUAL" ] || {
+  echo "오류(fail-closed): 체크섬 불일치"
+  echo "  기대: $EXPECTED"
+  echo "  실제: $ACTUAL"
+  state_now; exit 1; }
 
 mkdir -p "$DEST"
 # 🔴 **덮어쓰다 죽으면 옛 판이 깨진다** — 그러면 「최신도 아니고 옛 판도 아닌」 상태가 남는다.
