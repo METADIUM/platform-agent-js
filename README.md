@@ -2,7 +2,7 @@
 
 A Node/TypeScript **holder client and CLI** that lets an AI agent (Claude Code, for example)
 **authenticate to a service with a delegation VC**. It replaces static API keys with
-**scoped, time-bound, revocable delegation** (scenario #8 in `samples/docs/22`).
+**scoped, time-bound, revocable delegation** (scenario #8 in `platform-docs/22`).
 
 - **did:jwk keys** (ES256 / P-256) — generation and storage
 - **PoP JWTs** (proof of possession) — registration, retrieval, session exchange
