@@ -34,6 +34,24 @@ describe("service paths other repositories serve", () => {
     expect(DEFAULT_SERVICE.retrievePath).toBe("/api/agent/delegation/retrieve");
   });
 
+  it("the MCP path is where briefick mounts it", () => {
+    // 🔴 This pin was worthless until the value was read. [metapass-saas] measured it on #23:
+    // `DEFAULT_SERVICE.mcpPath` was declared and **never read** — `cli.ts` carried two of its own
+    // `"/api/mcp"` literals, so moving the field broke nothing and pinning it would have pinned a
+    // dead copy. Worse, the object's shape advertised it as the place to change the path. The two
+    // literals now read this field, so the pin means something.
+    expect(DEFAULT_SERVICE.mcpPath).toBe("/api/mcp");
+  });
+
+  it("the session paths are where briefick routes them", () => {
+    // ⚠️ `test/cli.test.ts` already hardcodes these in its stubs, so an accidental change is
+    // caught. What it cannot do is the thing this file exists for: name who has to be told.
+    // Someone changing them deliberately fixes both sides in one self-consistent edit and never
+    // learns briefick serves them ([metapass-saas], review of #23).
+    expect(DEFAULT_SERVICE.sessionStartPath).toBe("/api/agent/session/start");
+    expect(DEFAULT_SERVICE.sessionCompletePath).toBe("/api/agent/session/complete");
+  });
+
   it("🔴 the PoP audiences match the strings briefick verifies against", () => {
     // A PoP audience mismatch fails *after* a successful HTTP round trip: status 2xx, path
     // correct, briefick's probe green, registration broken. This side is the only guard.
