@@ -59,7 +59,7 @@ import { AgentClient } from "../src/briefick.js";
  * ⬜ There is no device that closes this from here. What is available is saying where the rule
  * lives and what happens when it moves, which is what the paragraph above is for.
  */
-const BRIEFICK_SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]{1,24})?$/;
+const BRIEFICK_SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]{1,24})?(?:\+[0-9A-Za-z.-]{1,24})?$/;
 
 function bodyOf(calls: Array<{ body: unknown }>): Record<string, unknown> {
   return JSON.parse(String((calls[0] as { body: string }).body)) as Record<string, unknown>;
@@ -126,6 +126,17 @@ describe("the version this CLI reports on register", () => {
   it("🔴 a release-tag-shaped version would NOT be stored — the control for the line above", () => {
     expect("v0.5.6").not.toMatch(BRIEFICK_SEMVER);
     expect("0.5").not.toMatch(BRIEFICK_SEMVER);
+  });
+
+  it("🔴 accepts a prerelease AND build metadata together — valid semver the old copy rejected", () => {
+    // The old form was `(?:[-+]…)?` — ONE optional group, so a version carrying both was thrown
+    // away. semver.org's own example is in this shape (`briefick#48`, found by minipaas).
+    // ⚠️ This is briefick WIDENING, announced before the change as agreed. The copy here is
+    // updated to match; had it not been, a release in this shape would have gone red on this side
+    // while briefick stored it happily — a false red, the mirror of the silent drop this file
+    // guards against.
+    expect("1.2.3-rc.1+build.5").toMatch(BRIEFICK_SEMVER);
+    expect("1.2.3-0.3.7+build.11.e0f985a").toMatch(BRIEFICK_SEMVER);
   });
 
   it("⚠️ documents a shared quirk: a leading zero is accepted, though semver forbids it", () => {
