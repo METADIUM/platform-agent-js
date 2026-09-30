@@ -17,10 +17,23 @@ import { AgentClient } from "../src/briefick.js";
  * **tags** carry the `v`; `package.json` does not. Sending the tag would be silently dropped on
  * their side and look like an agent that never reported.
  *
- * 🔴 **The regex below is a TRANSCRIPTION of a rule this repository does not own.** Source:
- * briefick `src/app/api/agent/register/route.ts:51` at `1e2730b2` (byte-compared 2026-09-30 by
- * `[metapass-saas]`). It is not a contract either side declares independently — briefick has
- * nothing written down about what we send — so it drifts, and **the drift has a direction**
+ * 🔴 **The regex below is a TRANSCRIPTION of a rule this repository does not own.** Source of
+ * record: briefick `src/lib/agent-cli-version.ts` (`CLI_VERSION_RE`). ⚠️ This comment already went
+ * stale once — it named `register/route.ts:51` at `1e2730b2`, which is where the rule lived when
+ * it was transcribed and is not where it lives now (`[Briefick]`, review of #24). **A citation to
+ * another repository's line is a copy with no guard**, which is the same defect the paragraph is
+ * about.
+ *
+ * 🟢 briefick has since built the half this side cannot: their probe runs the **real packaged CLI**
+ * against a stub and checks the posted `version` with that filter, and rejected versions are
+ * logged server-side — so *"never reported"* and *"reported and discarded"* are now
+ * distinguishable, which was the failure mode that made this copy dangerous.
+ *
+ * ⬜ What neither side catches: briefick tightening **between pin bumps** so that a version newer
+ * than the pinned one is rejected. Their runtime log sees it; no CI on either side does.
+ *
+ * It is still not a contract either side declares independently — briefick has nothing written
+ * down about what we send — so it drifts, and **the drift has a direction**
  * (`[metapass-saas]`, review of #24):
  *
  * ```
