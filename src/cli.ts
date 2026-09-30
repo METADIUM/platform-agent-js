@@ -14,7 +14,7 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { hostname } from "node:os";
 import { AgentKey } from "./key.js";
-import { AgentClientError, BriefickAgentClient, isRequestExpired } from "./briefick.js";
+import { AgentClientError, BriefickAgentClient, isRequestExpired, DEFAULT_SERVICE } from "./briefick.js";
 import { AgentAuth } from "./agent.js";
 import { startProxy, type BearerSource } from "./proxy.js";
 import { defaultKeyFile, loadStore, openStore, type AgentStore, type KeyStore } from "./keystore.js";
@@ -428,6 +428,19 @@ export function agentClient(baseUrl: string, key: AgentKey): BriefickAgentClient
   return new BriefickAgentClient({ baseUrl, key, version: packageVersion() ?? undefined });
 }
 
+/**
+ * The MCP endpoint for an RP, assembled in one place.
+ *
+ * 🔴 There were two assembly sites and no test could reach either. Every test that touches
+ * `targetMcpUrl` **passes the finished value in** (`test/daemon.test.ts`, `test/proxy.test.ts`),
+ * which makes them structurally unable to see how it is built — adding cases to them would never
+ * reach the assembly (`[metapass-saas]`, review of #23). Same shape as `agentClient()`: consolidate
+ * first, and the test that follows is reaching production code rather than its own construction.
+ */
+export function mcpUrlFor(baseUrl: string, mcpPath?: string): string {
+  return baseUrl.replace(/\/+$/, "") + (mcpPath ?? DEFAULT_SERVICE.mcpPath);
+}
+
 export async function main(argv: string[]): Promise<number> {
   const args = parse(argv);
 
@@ -705,7 +718,7 @@ export async function main(argv: string[]): Promise<number> {
       const client = agentClient(rp.url, key);
       const target: DaemonTarget = {
         alias: rp.alias,
-        targetMcpUrl: rp.url.replace(/\/+$/, "") + (rp.mcpPath ?? "/api/mcp"),
+        targetMcpUrl: mcpUrlFor(rp.url, rp.mcpPath),
         auth: null,
         pendingReason: "위임 미확보 — 지갑에서 승인하면 자동 연결됩니다",
       };
@@ -769,7 +782,7 @@ export async function main(argv: string[]): Promise<number> {
     }
 
     const base = args.url.replace(/\/+$/, "");
-    const targetMcpUrl = base + (args.mcpPath ?? "/api/mcp");
+    const targetMcpUrl = mcpUrlFor(base, args.mcpPath);
     const alias = aliasFromUrl(base);
     // 로컬 인증 토큰 기본 적용(doc26 §2-5) — 무토큰은 --insecure-no-token 명시 시에만
     let proxy: { url: string; port: number; close(): Promise<void> };
