@@ -47,9 +47,10 @@
  * also sends it on `startSession`).
  *
  * ⚠️ **And even then the query samples agents that open sessions with briefick, not installs.** An
- * agent installed and never paired, or paired and idle, is absent from it — so the fraction is an
- * upper bound on readiness among active agents and says nothing about the rest (`[Briefick]`,
- * review of #22).
+ * agent installed and never paired, or paired and idle, is absent from it. ⇒ Among agents that do
+ * open sessions the fraction is **the measurement**; as a statement about **installs** it is an
+ * upper bound, and the gap is every agent that never appears (`[Briefick]`, review of #22 —
+ * correcting an earlier version that attached "upper bound" to the wrong population).
  *
  * ⚠️ **Compromise is out of scope, deliberately.** The plan above needs a release signed by the
  * old key, which an attacker holding that key can also produce. Under compromise there is no
