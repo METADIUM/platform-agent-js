@@ -13,10 +13,31 @@ import { AgentClient } from "../src/briefick.js";
  * that registered without it never reports retroactively, so a version that silently stops being
  * sent is not noticed until the rotation day, which is the day it is needed.
  *
- * ⚠️ briefick stores it only when it matches semver, and a `v` prefix is **rejected**
- * (`briefick#44`: `/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]{1,24})?$/`). Release **tags** carry the `v`;
- * `package.json` does not. Sending the tag would be silently dropped on their side and look like
- * an agent that never reported.
+ * ⚠️ briefick stores it only when it matches semver, and a `v` prefix is **rejected**. Release
+ * **tags** carry the `v`; `package.json` does not. Sending the tag would be silently dropped on
+ * their side and look like an agent that never reported.
+ *
+ * 🔴 **The regex below is a TRANSCRIPTION of a rule this repository does not own.** Source:
+ * briefick `src/app/api/agent/register/route.ts:51` at `1e2730b2` (byte-compared 2026-09-30 by
+ * `[metapass-saas]`). It is not a contract either side declares independently — briefick has
+ * nothing written down about what we send — so it drifts, and **the drift has a direction**
+ * (`[metapass-saas]`, review of #24):
+ *
+ * ```
+ * briefick LOOSENS   this test is stricter than reality   nothing breaks
+ * briefick TIGHTENS  this test stays GREEN, their side starts dropping values
+ *                    ⇒ indistinguishable from "an agent that never reported"
+ *                    ⇒ invisible until the rotation day, which is the day it is needed
+ * ```
+ *
+ * ⇒ So this file guards the direction where no value is lost and **fails to guard the direction
+ * this feature exists for**. Partial cover exists on their side — their fixture table hardcodes
+ * `0.5.6` and `0.6.0-rc.1`, so a tightening that rejects those goes red there. What neither side
+ * catches is a tightening that keeps their fixtures and rejects a **future** version of this
+ * package (a prerelease tag longer than 24 characters, for instance).
+ *
+ * ⬜ There is no device that closes this from here. What is available is saying where the rule
+ * lives and what happens when it moves, which is what the paragraph above is for.
  */
 const BRIEFICK_SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]{1,24})?$/;
 

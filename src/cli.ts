@@ -414,6 +414,12 @@ export const helpText = (inv: string = invocation()): string => `platform-agent 
  * `v0.5.6` left all five tests green, because none of them went through here.
  */
 export function agentClient(baseUrl: string, key: AgentKey): BriefickAgentClient {
+  // ⚠️ The same `packageVersion()` null is a **hard failure** for `--version` and a **silent
+  //    omission** here, and that is deliberate: refusing to register because the CLI cannot read
+  //    its own version would be worse than registering without reporting one. briefick reads the
+  //    absent key as "keep what you have" (`[metapass-saas]`, review of #24, who measured that the
+  //    null does not actually occur in the SEA — `build-sea.mjs` bakes `__AGENT_VERSION__` and
+  //    fails the build if it is missing).
   return new BriefickAgentClient({ baseUrl, key, version: packageVersion() ?? undefined });
 }
 
