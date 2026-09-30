@@ -337,25 +337,39 @@ async function connectTarget(
   }
 }
 
-const HELP = `platform-agent — AI 에이전트 위임 등록/세션/프록시 CLI
+
+/**
+ * 사용자가 방금 친 «그 호출 형태» — 도움말과 안내 문구가 이걸로 자기를 부른다.
+ *
+ * 🔴 왜 있나: 설치형(SEA) 은 **npx 를 못 쓰는 머신**을 위해 존재하는데, 종전에는 그 바이너리의
+ *    `help` 가 `npx …` 를 실행하라고 안내했다(briefick #33 리뷰에서 실제로 돌려 보고 나왔다).
+ *    Node 가 없어서 설치형을 쓰는 사람에게 **실행할 수 없는 명령**을 준 것이다.
+ * ⚠️ SEA 에서는 `process.execPath` 가 곧 그 바이너리 경로다 — 사용자가 친 것과 같은 문자열이라
+ *    그대로 붙여넣어 쓸 수 있다.
+ */
+export function invocation(sea: boolean = isSeaBinary(), execPath: string = process.execPath): string {
+  return sea ? execPath : "npx @metadium-did/platform-agent-js";
+}
+
+export const helpText = (inv: string = invocation()): string => `platform-agent — AI 에이전트 위임 등록/세션/프록시 CLI
 
 사용(데몬 — 권장, doc26):
-  npx @metadium-did/platform-agent-js add <RP_URL> --code <PAIRING_CODE> [--alias 이름]
-  npx @metadium-did/platform-agent-js up                # 등록된 전 RP를 한 데몬으로(로컬 토큰 필수)
-  npx @metadium-did/platform-agent-js status            # RP별 위임 유효·만료·데몬 상태
-  npx @metadium-did/platform-agent-js remove <alias>
-  npx @metadium-did/platform-agent-js rotate-token      # ⚠ 회전 = 전 RP MCP 재등록 필요
-  npx @metadium-did/platform-agent-js up --install      # OS 데몬 설치+시작(launchd/systemd --user+linger)
-  npx @metadium-did/platform-agent-js down --uninstall  # OS 데몬 중지·제거
-  npx @metadium-did/platform-agent-js upgrade           # 유닛 재설치(실행 라인 갱신)·재시작
+  ${inv} add <RP_URL> --code <PAIRING_CODE> [--alias 이름]
+  ${inv} up                # 등록된 전 RP를 한 데몬으로(로컬 토큰 필수)
+  ${inv} status            # RP별 위임 유효·만료·데몬 상태
+  ${inv} remove <alias>
+  ${inv} rotate-token      # ⚠ 회전 = 전 RP MCP 재등록 필요
+  ${inv} up --install      # OS 데몬 설치+시작(launchd/systemd --user+linger)
+  ${inv} down --uninstall  # OS 데몬 중지·제거
+  ${inv} upgrade           # 유닛 재설치(실행 라인 갱신)·재시작
                                                        # ⚠ 판은 안 바뀐다 — 설치형은 install.sh 를 다시 돌려라
 
 사용(단일 RP·저수준):
-  npx @metadium-did/platform-agent-js register --url <RP_URL> --code <PAIRING_CODE>
-  npx @metadium-did/platform-agent-js proxy    --url <RP_URL> [--port 8787]
-  npx @metadium-did/platform-agent-js did
-  npx @metadium-did/platform-agent-js session  --url <RP_URL>
-  npx @metadium-did/platform-agent-js credentials clear [--url <RP_URL>]
+  ${inv} register --url <RP_URL> --code <PAIRING_CODE>
+  ${inv} proxy    --url <RP_URL> [--port 8787]
+  ${inv} did
+  ${inv} session  --url <RP_URL>
+  ${inv} credentials clear [--url <RP_URL>]
 
 명령:
   add                RP 추가 — 페어링(register)+데몬 설정을 한 번에. 끝나면 claude mcp add 명령(로컬 토큰 포함) 출력
@@ -398,7 +412,7 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (args.unknownFlags?.length) {
-    return fail(`알 수 없는 옵션: ${args.unknownFlags.join(" ")}\n\n${HELP}`);
+    return fail(`알 수 없는 옵션: ${args.unknownFlags.join(" ")}\n\n${helpText()}`);
   }
 
   if (args.cmd === "version") {
@@ -429,7 +443,7 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (!args.cmd || args.cmd === "help") {
-    console.log(HELP);
+    console.log(helpText());
     return args.cmd ? 0 : 1;
   }
 
@@ -549,7 +563,7 @@ export async function main(argv: string[]): Promise<number> {
     if (cfg.rps.length > 1) {
       console.log(`\n⚠ RP가 ${cfg.rps.length}개 — 루트 /mcp 등록이 있었다면 경로형으로 재등록하세요(status가 전체 명령 출력)`);
     }
-    console.log(`\n데몬 실행: npx @metadium-did/platform-agent-js up`);
+    console.log(`\n데몬 실행: ${invocation()} up`);
     return 0;
   }
 
@@ -647,7 +661,7 @@ export async function main(argv: string[]): Promise<number> {
     const r = installUnit(join(dir, "daemon.log"));
     console.log(`✅ OS 데몬 설치·시작(${r.kind}): ${r.unitPath}`);
     for (const n of r.notes) console.log("  " + n);
-    console.log("  상태: npx @metadium-did/platform-agent-js status");
+    console.log(`  상태: ${invocation()} status`);
     return 0;
   }
 
@@ -763,7 +777,7 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  return fail(`알 수 없는 명령: ${args.cmd}\n\n${HELP}`);
+  return fail(`알 수 없는 명령: ${args.cmd}\n\n${helpText()}`);
 }
 
 /**
