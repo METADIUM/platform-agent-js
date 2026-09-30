@@ -131,6 +131,12 @@ describe("the version this CLI reports on register", () => {
     // 🔴 Pinned so a well-meaning "make it real semver" edit on this side alone goes red. Both
     // sides accept it today; tightening one and not the other starts discarding values silently,
     // which is the direction this file cannot otherwise guard ([metapass-saas], review of #24).
+    //
+    // ⚠️ **Do not "fix" this to match the spec.** This assertion is deliberately wrong about
+    // semver and right about briefick. `[Briefick]` stated on 2026-09-30 that they have no plan
+    // to tighten `CLI_VERSION_RE`, and that they will announce it in a briefick PR first — at
+    // which point this test going red is the intended signal, not a defect.
+    // ⇒ If that changes, the thing to update is the transcription, not this expectation.
     expect("01.2.3").toMatch(BRIEFICK_SEMVER);
   });
 
