@@ -50,6 +50,17 @@ export interface AgentClientOptions {
   service?: AgentServiceConfig;
   /** KB-JWT audience 오버라이드. 미지정 시 sso responseUri에서 did:web 유도. */
   verifierId?: string;
+  /**
+   * 이 CLI 의 판. 등록 본문의 `version` 으로 나간다.
+   *
+   * 🔴 briefick 이 이걸 `AgentToken.cliVersion` 으로 저장해, **상류 서명키 회전의 전파율**을
+   * 질의로 만든다(`briefick#44`). 그 칸은 **소급이 안 된다** — 이 판을 안 보내고 등록한
+   * 에이전트는 나중에 보고하지 않는다.
+   *
+   * ⚠️ semver 모양(`0.5.6`)만 저장된다. `v` 접두어는 거부되므로 태그(`v0.5.6`)가 아니라
+   * `package.json` 의 값을 보낸다. 알 수 없으면 **보내지 않는다**(빈 문자열이 아니라 부재).
+   */
+  version?: string;
   fetchImpl?: FetchLike;
 }
 
@@ -101,6 +112,7 @@ export class AgentClient {
   private readonly key: AgentKey;
   private readonly svc: Required<AgentServiceConfig>;
   private readonly verifierId?: string;
+  private readonly version?: string;
   private readonly http: FetchLike;
 
   constructor(opts: AgentClientOptions) {
@@ -108,6 +120,7 @@ export class AgentClient {
     this.key = opts.key;
     this.svc = { ...DEFAULT_SERVICE, ...(opts.service ?? {}), popAudience: { ...DEFAULT_SERVICE.popAudience, ...(opts.service?.popAudience ?? {}) } };
     this.verifierId = opts.verifierId;
+    this.version = opts.version;
     this.http = opts.fetchImpl ?? fetch;
   }
 
@@ -147,7 +160,10 @@ export class AgentClient {
   /** 페어링 등록 — 사용자가 RP UI에서 발급한 코드로 did:jwk 바인딩(PoP). */
   async register(code: string, label?: string): Promise<{ registered: boolean; id?: string }> {
     const pop = await this.key.popJwt(this.svc.popAudience.register, { code });
-    return this.postJson(this.svc.registerPath, { didJwk: this.key.did, code, pop, label });
+    // ⚠️ `version` and `label` are **omitted when unknown**, not sent empty. briefick reads a
+    //    missing key as "keep what you have" and an empty one as a value, so `undefined` is the
+    //    only spelling of "could not determine" — `registerLabel` makes the same distinction.
+    return this.postJson(this.svc.registerPath, { didJwk: this.key.did, code, pop, label, version: this.version });
   }
 
   /** 승인된 위임 VC 1회 회수(delivered면 credential 반환, pending이면 재시도). */

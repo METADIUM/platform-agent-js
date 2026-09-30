@@ -406,6 +406,17 @@ export const helpText = (inv: string = invocation()): string => `platform-agent 
 ⚠️ 모르는 옵션은 **거부**한다(무시하지 않는다). 옛 판에서 새 플래그를 쓰면 조용히 빠져
    «된 것처럼» 보이던 것을 막는다 — 예: 0.3.0 에서 "up --install" 은 그냥 "up" 이었다.`;
 
+/**
+ * The one place a client is constructed, so the version it reports is wired once.
+ *
+ * 🔴 There were four call sites and the version was added to each by hand. A test that builds its
+ * own client cannot see that wiring at all — measured: sabotaging the version to a tag-shaped
+ * `v0.5.6` left all five tests green, because none of them went through here.
+ */
+export function agentClient(baseUrl: string, key: AgentKey): BriefickAgentClient {
+  return new BriefickAgentClient({ baseUrl, key, version: packageVersion() ?? undefined });
+}
+
 export async function main(argv: string[]): Promise<number> {
   const args = parse(argv);
 
@@ -476,7 +487,7 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     if (!args.code) return fail("--code (또는 PAIRING_CODE) 필요 — Briefick 에이전트 페이지의 페어링 코드");
-    const client = new BriefickAgentClient({ baseUrl: args.url, key });
+    const client = agentClient(args.url, key);
     await client.register(args.code, registerLabel(args));
     data.registrations = { ...(data.registrations ?? {}), [args.url]: true };
     store.save(data);
@@ -492,7 +503,7 @@ export async function main(argv: string[]): Promise<number> {
     if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
     const store = openAgentStore(args);
     const { key, data } = await keyFrom(store);
-    const client = new BriefickAgentClient({ baseUrl: args.url, key });
+    const client = agentClient(args.url, key);
     const cred = await ensureCredential(client, data, args.url, store, key);
     let r;
     try {
@@ -551,7 +562,7 @@ export async function main(argv: string[]): Promise<number> {
     //    (metapass-saas 실측 · briefick#18). 「성공처럼 보이는 실패」의 CLI 판이다.
     if (!data.registrations?.[url] || args.code) {
       if (!args.code) return fail("--code 필요(최초 페어링) — RP의 에이전트 등록 화면에서 발급");
-      const client = new BriefickAgentClient({ baseUrl: url, key });
+      const client = agentClient(url, key);
       await client.register(args.code, registerLabel(args));
       data.registrations = { ...(data.registrations ?? {}), [url]: true };
       store.save(data);
@@ -725,7 +736,7 @@ export async function main(argv: string[]): Promise<number> {
     if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
     const store = openAgentStore(args);
     const { key, data } = await keyFrom(store);
-    const client = new BriefickAgentClient({ baseUrl: args.url, key });
+    const client = agentClient(args.url, key);
     let credential = await ensureCredential(client, data, args.url, store, key);
     let auth: AgentAuth;
     for (let attempt = 0; ; attempt++) {
