@@ -38,9 +38,10 @@ import { AgentClient } from "../src/briefick.js";
  * it). Both sides accept it, so this is a shared quirk rather than drift — and the distinction
  * matters, because a "fix" on one side alone would start silently dropping values.
  *
- * It is still not a contract either side declares independently — briefick has nothing written
- * down about what we send — so it drifts, and **the drift has a direction**
- * (`[metapass-saas]`, review of #24):
+ * ⚠️ It was not a contract either side declared independently. That has changed: briefick's
+ * `agent-cli-version.test.ts` (`#44` `ca958fef`) now fixes their accepted range, so both sides
+ * state it and either can go red. What remains is that **this file holds a copy**, and a copy
+ * drifts — with **a direction** (`[metapass-saas]`, review of #24):
  *
  * ```
  * briefick LOOSENS   this test is stricter than reality   nothing breaks
@@ -133,10 +134,16 @@ describe("the version this CLI reports on register", () => {
     // which is the direction this file cannot otherwise guard ([metapass-saas], review of #24).
     //
     // ⚠️ **Do not "fix" this to match the spec.** This assertion is deliberately wrong about
-    // semver and right about briefick. `[Briefick]` stated on 2026-09-30 that they have no plan
-    // to tighten `CLI_VERSION_RE`, and that they will announce it in a briefick PR first — at
-    // which point this test going red is the intended signal, not a defect.
-    // ⇒ If that changes, the thing to update is the transcription, not this expectation.
+    // semver and right about briefick.
+    //
+    // 🔴 **And be exact about what it catches.** It reads THIS file's copy, so it goes red when
+    // *this side* tightens alone — which is the useful case, because that is the edit a
+    // well-meaning reader makes. It does **not** go red when briefick tightens: their change
+    // cannot reach this expectation (`[Briefick]`, review of #24, correcting an earlier version
+    // of this comment that claimed exactly that).
+    // ⇒ The briefick side is pinned by their own test (`agent-cli-version.test.ts`, `#44`
+    // `ca958fef`), which fixes the accepted range including `01.2.3` and goes red on a
+    // leading-zero ban. **Two tests pointing at each other, not two comments.**
     expect("01.2.3").toMatch(BRIEFICK_SEMVER);
   });
 
