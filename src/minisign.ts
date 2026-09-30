@@ -91,10 +91,26 @@ export function parseSignature(text: string): MinisignSignature {
  * `if (verify(...))` with no `else`, and the failure mode of this function is "install anything".
  */
 export function verifyContent(content: Buffer, sig: MinisignSignature, key: MinisignKey): void {
-  if (sig.keyId !== key.keyId) {
+  verifyContentAny(content, sig, [key]);
+}
+
+/**
+ * Verifies against the first trusted key whose id matches.
+ *
+ * 🔴 The refusal message names the exact command to recover with. `[Briefick]` pointed out that
+ * naming the *file* is not enough, and that the recovery route re-requires `minisign` — the one
+ * tool this command exists to stop needing — on precisely the day it is needed. That is a real
+ * cost of rotating and it belongs in the message, not only in a design note.
+ */
+export function verifyContentAny(content: Buffer, sig: MinisignSignature, keys: MinisignKey[]): void {
+  const key = keys.find((k) => k.keyId === sig.keyId);
+  if (!key) {
     throw new MinisignError(
-      `signature was made by key ${sig.keyId}, this build trusts ${key.keyId} — ` +
-        `if the release signing key was rotated, this binary cannot verify the new one; reinstall with install.sh`,
+      `this release is signed by key ${sig.keyId}; this binary trusts ${keys.map((k) => k.keyId).join(", ")}.\n` +
+        `  The release signing key was rotated and this build predates it, so it cannot verify the new one.\n` +
+        `  Recover by reinstalling — this needs the minisign tool again, which upgrade otherwise does not:\n` +
+        `    brew install minisign   # or: apt install minisign / dnf install minisign\n` +
+        `    gh release download -R METADIUM/platform-agent-js --pattern install.sh -O install.sh && sh install.sh`,
     );
   }
   const signed = sig.alg === "ED" ? createHash("blake2b512").update(content).digest() : content;

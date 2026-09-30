@@ -10,7 +10,7 @@
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { MINISIGN_PUBLIC_KEY } from "./release-key.js";
+import { MINISIGN_PUBLIC_KEYS } from "./release-key.js";
 import { downloadVerified, freeBytes, latestTag, planUpgrade } from "./upgrade.js";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -735,7 +735,7 @@ export async function main(argv: string[]): Promise<number> {
       await downloadVerified(plan, destination, {
         fetchText: httpText,
         fetchBinary: httpBinary,
-        publicKeyText: MINISIGN_PUBLIC_KEY,
+        publicKeyTexts: MINISIGN_PUBLIC_KEYS,
         log: (l) => console.log(l),
       });
     } catch (e) {

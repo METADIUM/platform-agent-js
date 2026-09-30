@@ -2,7 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { MinisignError, parsePublicKey, parseSignature, verifyContent } from "../src/minisign.js";
+import { MinisignError, parsePublicKey, parseSignature, verifyContent, verifyContentAny } from "../src/minisign.js";
 
 /**
  * 🔴 This is the check that lets `upgrade` replace the binary without the `minisign` tool.
@@ -46,7 +46,7 @@ describe("minisign verification against the real release key", () => {
 
   it("🔴 refuses a different key, before doing any maths", () => {
     const other = { keyId: "0000000000000000", publicKey: generateKeyPairSync("ed25519").publicKey };
-    expect(() => verifyContent(content, sig, other)).toThrow(/signature was made by key/);
+    expect(() => verifyContent(content, sig, other)).toThrow(/this release is signed by key/);
   });
 
   it("🔴 refuses a tampered trusted comment even when the file signature still matches", () => {
@@ -79,5 +79,37 @@ describe("parsing refuses malformed input rather than guessing", () => {
     const real = readFileSync(sigPath, "utf8").split("\n");
     real[2] = "comment: not the marker";
     expect(() => parseSignature(real.join("\n"))).toThrow(/not a trusted comment/);
+  });
+});
+
+describe("rotation: a build trusts a list, not a key", () => {
+  const key = parsePublicKey(pubText);
+  const sig = parseSignature(readFileSync(sigPath, "utf8"));
+  const content = readFileSync(sumsPath);
+  const stranger = { keyId: "0000000000000000", publicKey: generateKeyPairSync("ed25519").publicKey };
+
+  it("accepts when the signing key is anywhere in the trusted list", () => {
+    // This is the rotation window: a binary shipped with both keys takes releases signed by either.
+    expect(() => verifyContentAny(content, sig, [stranger, key])).not.toThrow();
+    expect(() => verifyContentAny(content, sig, [key, stranger])).not.toThrow();
+  });
+
+  it("🔴 refuses when no trusted key matches, and names the recovery command", () => {
+    // 🔴 The message is the only thing a stranded user has. [Briefick]'s point: naming the file is
+    // not enough, and the recovery route re-requires minisign — on the one day it is needed.
+    let message = "";
+    try {
+      verifyContentAny(content, sig, [stranger]);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain("signed by key fc9149bf27cbb2aa");
+    expect(message).toContain("brew install minisign");
+    expect(message).toContain("gh release download -R METADIUM/platform-agent-js");
+    expect(message).toContain("needs the minisign tool again");
+  });
+
+  it("🔴 refuses an empty trusted list rather than accepting anything", () => {
+    expect(() => verifyContentAny(content, sig, [])).toThrow(MinisignError);
   });
 });

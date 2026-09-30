@@ -22,7 +22,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, renameSync, statfsSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { MinisignError, parsePublicKey, parseSignature, verifyContent } from "./minisign.js";
+import { MinisignError, parsePublicKey, parseSignature, verifyContentAny } from "./minisign.js";
 
 export const RELEASE_REPO = "METADIUM/platform-agent-js";
 export const RELEASE_BASE = `https://github.com/${RELEASE_REPO}/releases`;
@@ -134,7 +134,7 @@ export function checksumFor(sums: string, asset: string): string {
 export interface UpgradeIo {
   fetchText(url: string): Promise<string>;
   fetchBinary(url: string): Promise<Buffer>;
-  publicKeyText: string;
+  publicKeyTexts: readonly string[];
   log(line: string): void;
 }
 
@@ -159,12 +159,12 @@ export async function downloadVerified(
   io: UpgradeIo,
 ): Promise<void> {
   const base = `${RELEASE_BASE}/download/v${plan.to}`;
-  const key = parsePublicKey(io.publicKeyText);
+  const keys = io.publicKeyTexts.map(parsePublicKey);
 
   io.log(`  fetching SHA256SUMS and its signature (${plan.to})`);
   const sumsText = await io.fetchText(`${base}/SHA256SUMS`);
   const sigText = await io.fetchText(`${base}/SHA256SUMS.minisig`);
-  verifyContent(Buffer.from(sumsText, "utf8"), parseSignature(sigText), key);
+  verifyContentAny(Buffer.from(sumsText, "utf8"), parseSignature(sigText), keys);
   io.log("  ✅ signature over SHA256SUMS verified");
 
   const expected = checksumFor(sumsText, plan.asset);
