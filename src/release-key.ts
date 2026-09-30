@@ -53,15 +53,22 @@
  * agents absent):
  *
  * ```
- * never paired          no row      absent            ← the gap
- * paired, then idle     ROW EXISTS  frozen at pairing ← wrong data being counted
- * paired + sessions     ROW EXISTS  current
+ * never paired              no row      absent                  ← the gap
+ * paired, never sessioned   ROW EXISTS  the pairing version
+ * paired, ran, then idle    ROW EXISTS  the LAST REPORTED one    ← stale, but not by as much
+ * paired + sessions now     ROW EXISTS  current
  * ```
  *
- * ⇒ The query samples **every paired agent**, not the ones that open sessions. Both errors push
- * readiness down, so the conclusion holds — but the second is **measurable** and this paragraph
- * used to treat the whole error as unmeasurable. briefick can identify rows whose `cliVersion`
- * has not moved since pairing, and `lastSeenAt` already exists.
+ * ⚠️ The middle rows are not the same, and an earlier version of this table collapsed them into
+ * "frozen at pairing" (`[Briefick]`, review of #47). `cliVersion` updates on `register` **and** on
+ * every `session/start` where it changed, so an agent that upgraded, ran, and then went quiet
+ * carries the version it last reported — **newer than its pairing value**. ⇒ My wording
+ * *overstated* the error; it is only "frozen at pairing" for an agent that never opened a session.
+ *
+ * ⇒ The query samples **every paired agent**, not the ones that open sessions. All of it pushes
+ * readiness down, so the conclusion holds — but the staleness is **measurable** and this paragraph
+ * used to treat the whole error as unmeasurable. The identifying mark is a row whose `cliVersion`
+ * has not moved since its `lastSeenAt`, not since pairing.
  *
  * 📌 It is #24's finding one level up: **a value written once and read as current.** #24 fixed the
  * *write* (`startSession` reports too); the *query* still has to account for writes that have not
