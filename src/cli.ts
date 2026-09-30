@@ -409,9 +409,14 @@ export const helpText = (inv: string = invocation()): string => `platform-agent 
 /**
  * The one place a client is constructed, so the version it reports is wired once.
  *
- * 🔴 There were four call sites and the version was added to each by hand. A test that builds its
- * own client cannot see that wiring at all — measured: sabotaging the version to a tag-shaped
+ * 🔴 There were **five** call sites and the version was added to each by hand. A test that builds
+ * its own client cannot see that wiring at all — measured: sabotaging the version to a tag-shaped
  * `v0.5.6` left all five tests green, because none of them went through here.
+ *
+ * ⚠️ I counted four. The fifth was the `up` daemon loop, found by `[Briefick]` grepping rather
+ * than trusting the count — and it is the **longest-running** path, so an agent that upgrades and
+ * keeps running would have been the one case never reporting a version. A guard that catches a
+ * sixth does not exist; this comment is what there is.
  */
 export function agentClient(baseUrl: string, key: AgentKey): BriefickAgentClient {
   // ⚠️ The same `packageVersion()` null is a **hard failure** for `--version` and a **silent
@@ -697,7 +702,7 @@ export async function main(argv: string[]): Promise<number> {
 
     const targets: DaemonTarget[] = [];
     for (const rp of cfg.rps) {
-      const client = new BriefickAgentClient({ baseUrl: rp.url, key });
+      const client = agentClient(rp.url, key);
       const target: DaemonTarget = {
         alias: rp.alias,
         targetMcpUrl: rp.url.replace(/\/+$/, "") + (rp.mcpPath ?? "/api/mcp"),

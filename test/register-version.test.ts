@@ -45,7 +45,25 @@ function bodyOf(calls: Array<{ body: unknown }>): Record<string, unknown> {
   return JSON.parse(String((calls[0] as { body: string }).body)) as Record<string, unknown>;
 }
 
-async function capture(version?: string) {
+async function captureSession(version?: string) {
+  const calls: Array<{ body: string }> = [];
+  const client = new AgentClient({
+    baseUrl: "https://rp.example",
+    version,
+    key: { did: "did:jwk:x", popJwt: async () => "pop" } as never,
+    fetchImpl: (async (_url: string, init: { body: string }) => {
+      calls.push(init);
+      return { ok: true, status: 200, text: async () => JSON.stringify({ state: "s", nonce: "n", responseUri: "u" }) };
+    }) as never,
+  });
+  await client.startSession();
+  return { body: JSON.parse(calls[0].body) as Record<string, unknown> };
+}
+
+// ⚠️ No default for `label`: a default parameter treats an EXPLICIT `undefined` as absent and
+//    substitutes it, so `capture(v, undefined)` would have tested the present case while reading
+//    as the absent one. Callers pass it explicitly.
+async function capture(version: string | undefined, label: string | undefined) {
   const calls: Array<{ body: unknown }> = [];
   const client = new AgentClient({
     baseUrl: "https://rp.example",
@@ -59,19 +77,19 @@ async function capture(version?: string) {
       return { ok: true, status: 200, text: async () => JSON.stringify({ registered: true }) };
     }) as never,
   });
-  await client.register("CODE", "host-1");
+  await client.register("CODE", label);
   return bodyOf(calls);
 }
 
 describe("the version this CLI reports on register", () => {
   it("is sent, and in the shape briefick stores", async () => {
-    const body = await capture("0.5.6");
+    const body = await capture("0.5.6", "host-1");
     expect(body.version).toBe("0.5.6");
     expect(String(body.version)).toMatch(BRIEFICK_SEMVER);
   });
 
   it("🔴 is omitted entirely when unknown — an absent key means «keep what you have» there", async () => {
-    const body = await capture(undefined);
+    const body = await capture(undefined, "host-1");
     expect("version" in body).toBe(false);
     // An empty string would be a VALUE on their side, not an absence. Same distinction as label.
     expect(body.version).toBeUndefined();
@@ -90,10 +108,30 @@ describe("the version this CLI reports on register", () => {
     expect("0.5").not.toMatch(BRIEFICK_SEMVER);
   });
 
-  it("keeps label and version independent — either can be absent alone", async () => {
-    const body = await capture("0.5.6");
-    expect(body.label).toBe("host-1");
+  it("keeps label and version independent — measured in all four combinations", async () => {
+    // 🔴 An earlier version of this ran only the both-present case while its name promised four
+    // (`[Briefick]`, review of #24). A name that claims more than the body checks is the defect
+    // this repo's rule is about, in a test.
+    expect(await capture("0.5.6", "host-1")).toMatchObject({ label: "host-1", version: "0.5.6" });
+    expect("version" in (await capture(undefined, "host-1"))).toBe(false);
+    expect("label" in (await capture("0.5.6", undefined))).toBe(false);
+    const neither = await capture(undefined, undefined);
+    expect("version" in neither).toBe(false);
+    expect("label" in neither).toBe(false);
+  });
+});
+
+describe("the session call, which is the one that sees upgrades", () => {
+  it("🔴 startSession reports the version too — register runs once per pairing", async () => {
+    // 🔴 The finding this test exists for: an upgraded CLI never re-registers, so a version
+    // recorded at register is frozen at pairing. Sessions re-issue on a short TTL.
+    const { body } = await captureSession("0.5.6");
     expect(body.version).toBe("0.5.6");
+  });
+
+  it("🔴 omits it when unknown, same rule as register", async () => {
+    const { body } = await captureSession(undefined);
+    expect("version" in body).toBe(false);
   });
 });
 

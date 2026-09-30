@@ -202,7 +202,15 @@ export class AgentClient {
   /** 세션 교환 시작 — 검증자 제시용 nonce·responseUri 획득. */
   async startSession(): Promise<SessionStart> {
     const pop = await this.key.popJwt(this.svc.popAudience.session);
-    const r = await this.postJson(this.svc.sessionStartPath, { didJwk: this.key.did, pop });
+    // 🔴 `version` goes here as well as on register, and **this** is the call that answers the
+    //    question it exists for. `register` runs once per pairing — an upgraded CLI does not
+    //    re-register (re-running without `--code` returns before any request), so a `cliVersion`
+    //    recorded there is "the version at pairing", frozen. An agent paired on 0.5.6 and upgraded
+    //    to the intermediate release would still read 0.5.6 on the rotation day, which is the one
+    //    day the number is read (`[Briefick]`, review of #24, who measured the zero-request
+    //    re-run and built the receiving end at `briefick#44 8cb1f222`).
+    //    ⚠️ Sessions re-issue on a short TTL, so this is where an upgrade becomes visible.
+    const r = await this.postJson(this.svc.sessionStartPath, { didJwk: this.key.did, pop, version: this.version });
     return { state: r.state, nonce: r.nonce, responseUri: r.responseUri };
   }
 
