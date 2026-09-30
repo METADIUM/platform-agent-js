@@ -32,6 +32,12 @@ import { AgentClient } from "../src/briefick.js";
  * ⬜ What neither side catches: briefick tightening **between pin bumps** so that a version newer
  * than the pinned one is rejected. Their runtime log sees it; no CI on either side does.
  *
+ * 🟢 Byte-identical to `CLI_VERSION_RE` as of `8cb1f222` (`[metapass-saas]`, re-measured after the
+ * rule moved into its own module — the earlier comparison was against the route file it used to
+ * live in). ⚠️ **It is not semver**: it accepts a leading zero (`01.2.3` matches; the spec forbids
+ * it). Both sides accept it, so this is a shared quirk rather than drift — and the distinction
+ * matters, because a "fix" on one side alone would start silently dropping values.
+ *
  * It is still not a contract either side declares independently — briefick has nothing written
  * down about what we send — so it drifts, and **the drift has a direction**
  * (`[metapass-saas]`, review of #24):
@@ -119,6 +125,13 @@ describe("the version this CLI reports on register", () => {
   it("🔴 a release-tag-shaped version would NOT be stored — the control for the line above", () => {
     expect("v0.5.6").not.toMatch(BRIEFICK_SEMVER);
     expect("0.5").not.toMatch(BRIEFICK_SEMVER);
+  });
+
+  it("⚠️ documents a shared quirk: a leading zero is accepted, though semver forbids it", () => {
+    // 🔴 Pinned so a well-meaning "make it real semver" edit on this side alone goes red. Both
+    // sides accept it today; tightening one and not the other starts discarding values silently,
+    // which is the direction this file cannot otherwise guard ([metapass-saas], review of #24).
+    expect("01.2.3").toMatch(BRIEFICK_SEMVER);
   });
 
   it("keeps label and version independent — measured in all four combinations", async () => {
