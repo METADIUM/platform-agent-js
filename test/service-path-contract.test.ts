@@ -59,7 +59,9 @@ describe("service paths other repositories serve", () => {
     // 🔴 The values, not their shape. An earlier version asserted these were non-empty strings,
     // which is true of every wrong value as well — briefick pointed out that it pins nothing
     // (review of #23). They confirmed these three are byte-identical to the constants in
-    // briefick `src/lib/agent-did.ts`, checked against this CLI's published 0.5.6 dist.
+    // briefick `src/lib/agent-did.ts`. ⚠️ Their comparison was source-to-source; an earlier
+    // version of this comment said "checked against this CLI's published 0.5.6 dist", which is a
+    // different measurement and not the one they ran (`[Briefick]`, review of #23).
     expect(DEFAULT_SERVICE.popAudience).toEqual({
       register: "briefick-agent-register",
       retrieve: "briefick-agent-retrieve",
