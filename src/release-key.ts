@@ -68,27 +68,26 @@
  * ⇒ The query samples **every paired agent**, not the ones that open sessions. All of it pushes
  * readiness down, so the conclusion holds.
  *
- * ⚠️ **Whether the staleness is measurable is OPEN, and two peers who both measured disagree.**
- * The instrument would be a row whose `cliVersion` has not moved since its last activity, so it
- * turns on whether briefick maintains an activity timestamp:
+ * 🟢 **The instrument exists; nobody has written the query.** `lastSeenAt` moves when an agent
+ * runs — `recordAgentSeen()` in briefick `src/lib/agent-seen.ts` writes it, called from
+ * `agent-auth.ts` (MCP auth, throttled to 5 minutes) and from `session/complete`, as well as at
+ * register (`[metapass-saas]`, retracting their own review of #22 after `[Briefick]` found the
+ * writer they had missed).
  *
- * ```
- * [metapass-saas]  lastSeenAt is written only by agent/register; session/start writes
- *                  cliVersion and touches no timestamp   ⇒ no instrument
- * [Briefick]       agent-seen.ts writes it, called from agent-auth and session/complete
- *                  ⇒ it does move on activity
- * ```
+ * 🟡 **But the two facts are written by different paths and do not imply each other.**
+ * `recordAgentSeen()` is **not** called from `session/start`, which is where `version` arrives. So
+ * an agent can move `lastSeenAt` (MCP auth) without ever reporting a version, and the predicate
+ * over `(cliVersion, lastSeenAt)` that would actually identify a stale row is **not established** —
+ * what is established is only that the column exists.
  *
- * ⇒ Both looked at briefick `main`; neither has been reconciled. The likely discriminator is
- * **scope**: a grep over route files finds only `register`'s inline use, while the writer lives in
- * a helper — and metapass's own note ("inside a `seen` object") points at that indirection. **This
- * repository cannot settle it**; there is no briefick checkout here.
- *
- * 🔴 This paragraph has now claimed the instrument exists (twice, in two wordings) and that it
- * does not (once) — **three assertions, all written before anyone opened the helper.** Each was
- * more specific than the last, which is what made each one read as checked. ⇒ Until someone reads
- * `agent-seen.ts`, the honest state is that **the rotation has no completion condition we have
- * agreed on**, which is the operative fact regardless of which measurement holds.
+ * 🔴 This paragraph asserted the instrument exists (twice, in two wordings), then that it does not
+ * (once), before anyone opened `agent-seen.ts`. Each version was more specific than the last —
+ * file names, route names, measured counts — and that is what made each one read as checked.
+ * ⚠️ The version that was wrong in the other direction came from a peer's **conditional** finding
+ * losing its condition at the repository boundary: their note said *"I did not search the whole
+ * repo for a writer"*, and what arrived here was *"there is no instrument"*, flat, with their name
+ * on it. ⇒ Same failure as the rotation parenthesis at the top of this file, with the roles
+ * reversed.
  *
  * 📌 It is #24's finding one level up: **a value written once and read as current.** #24 fixed the
  * *write* (`startSession` reports too); the *query* still has to account for writes that have not
