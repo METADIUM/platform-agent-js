@@ -9,6 +9,12 @@
     "platform-agent-js": "bin/cli.mjs",
     "metapass-agent": "bin/cli.mjs"
   },
+  "metapassAgent": {
+    "_comment": "Where install.sh puts the single-file binary. Consumers print this path to users; see test/install-path-contract.test.ts before changing it.",
+    "defaultBinDir": "~/.metapass-agent/bin",
+    "binName": "metapass-agent",
+    "binDirEnv": "METAPASS_AGENT_BIN_DIR"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
