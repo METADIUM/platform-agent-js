@@ -25,10 +25,16 @@
  * paired on. ⚠️ That field cannot be backfilled — it has to be added before a rotation, not during
  * one.
  *
- * ⚠️ **And the query samples agents that open sessions with briefick, not installs.** An agent
- * installed and never paired, or paired and idle, is absent from it — so the fraction it reports
- * is an upper bound on readiness among active agents and says nothing about the rest
- * (`[Briefick]`, review of #22).
+ * ⚠️ **Sending the version is not enough by itself.** `register` runs once per pairing, so a row
+ * filled there answers *"what fraction PAIRED at or past X"*, not *"what fraction IS at or past
+ * X"* — and the agents those two answers differ on are exactly the upgraded ones, which is the
+ * whole population a rotation is about (`[metapass-saas]`, review of #22; the fix is #24, which
+ * also sends it on `startSession`).
+ *
+ * ⚠️ **And even then the query samples agents that open sessions with briefick, not installs.** An
+ * agent installed and never paired, or paired and idle, is absent from it — so the fraction is an
+ * upper bound on readiness among active agents and says nothing about the rest (`[Briefick]`,
+ * review of #22).
  *
  * ⚠️ **Compromise is out of scope, deliberately.** The plan above needs a release signed by the
  * old key, which an attacker holding that key can also produce. Under compromise there is no
