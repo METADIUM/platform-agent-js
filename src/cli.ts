@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import { hostname } from "node:os";
 import { AgentKey } from "./key.js";
 import { AgentClientError, BriefickAgentClient, isRequestExpired } from "./briefick.js";
 import { AgentAuth } from "./agent.js";
@@ -25,6 +26,8 @@ import { startDaemon, type DaemonTarget } from "./daemon.js";
 import { install as installUnit, uninstall as uninstallUnit } from "./install.js";
 
 interface Args {
+  /** 등록 시 서버에 보내는 표시 이름. 미지정이면 호스트 이름. */
+  label?: string;
   cmd?: string;
   /** 서브커맨드 (예: credentials clear / add·remove의 URL·alias). */
   sub?: string;
@@ -86,6 +89,7 @@ function parse(argv: string[]): Args {
     }
     else if (a === "--mcp-path") out.mcpPath = val();
     else if (a === "--alias") out.alias = val();
+    else if (a === "--label") out.label = val();
     else if (a === "--insecure-no-token") out.insecureNoToken = true;
     else if (a === "--install") out.install = true;
     else if (a === "--uninstall") out.uninstallFlag = true;
@@ -354,7 +358,7 @@ export function invocation(sea: boolean = isSeaBinary(), execPath: string = proc
 export const helpText = (inv: string = invocation()): string => `platform-agent — AI 에이전트 위임 등록/세션/프록시 CLI
 
 사용(데몬 — 권장, doc26):
-  ${inv} add <RP_URL> --code <PAIRING_CODE> [--alias 이름]
+  ${inv} add <RP_URL> --code <PAIRING_CODE> [--alias 이름] [--label 표시이름]
   ${inv} up                # 등록된 전 RP를 한 데몬으로(로컬 토큰 필수)
   ${inv} status            # RP별 위임 유효·만료·데몬 상태
   ${inv} remove <alias>
@@ -387,6 +391,7 @@ export const helpText = (inv: string = invocation()): string => `platform-agent 
 옵션:
   --url <URL>        Briefick 베이스 URL (또는 env BRIEFICK_URL)
   --code <CODE>      에이전트 페이지의 페어링 코드 (또는 env PAIRING_CODE) — register 최초 1회만
+  --label <이름>     RP 목록에 표시할 이름 (기본: 이 머신의 호스트 이름) — register·add
   --port <N>         proxy·up 리슨 포트 (기본 8787, 127.0.0.1 전용)
                      up 에 주면 **이번 실행만** — 설정에 저장하지 않는다
   --mcp-path <PATH>  RP MCP 경로 (기본 /api/mcp)
@@ -472,7 +477,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     if (!args.code) return fail("--code (또는 PAIRING_CODE) 필요 — Briefick 에이전트 페이지의 페어링 코드");
     const client = new BriefickAgentClient({ baseUrl: args.url, key });
-    await client.register(args.code);
+    await client.register(args.code, registerLabel(args));
     data.registrations = { ...(data.registrations ?? {}), [args.url]: true };
     store.save(data);
     console.log(
@@ -547,7 +552,7 @@ export async function main(argv: string[]): Promise<number> {
     if (!data.registrations?.[url] || args.code) {
       if (!args.code) return fail("--code 필요(최초 페어링) — RP의 에이전트 등록 화면에서 발급");
       const client = new BriefickAgentClient({ baseUrl: url, key });
-      await client.register(args.code);
+      await client.register(args.code, registerLabel(args));
       data.registrations = { ...(data.registrations ?? {}), [url]: true };
       store.save(data);
     }
@@ -813,6 +818,38 @@ function packageVersion(): string | null {
   } catch {
     return null;
   }
+}
+
+/** 서버 등록에 실을 표시 이름의 최대 길이 — 목록 한 줄에 들어가는 폭. */
+export const LABEL_MAX = 64;
+
+/**
+ * 등록 시 서버에 보낼 표시 이름 — `--label` 이 있으면 그것, 없으면 **호스트 이름**.
+ *
+ * 왜 기본값이 있나: 에이전트 목록에서 «어느 머신에서 도는가»가 안 보였다. 사무실 NAT 뒤에서는
+ * 공인 IP 도 기기를 못 가른다(briefick #32). 이름이 없으면 목록이 전부 「AI 에이전트」다.
+ *
+ * ⚠️ **호스트 이름은 사람 이름을 담는 경우가 흔하다**(`jongsik-macbook` 같은). 그것이 RP 서버에
+ * 저장되고 목록에 표시된다. 기본 전송은 그 비용을 알고 고른 것이고, 바꾸려면 `--label` 로 원하는
+ * 이름을 주면 된다 — 끄는 스위치는 없다.
+ *
+ * 값이 비거나 공백뿐이거나 `hostname()` 이 실패하면 **아무것도 안 보낸다**(`undefined`) —
+ * 빈 문자열을 보내면 서버가 그것을 «이름이 있다»로 저장해 기본 표시보다 나빠진다.
+ */
+export function registerLabel(
+  args: { label?: string },
+  /** 호스트 이름 조회 — 시험이 «못 알아내는 경우»를 만들 수 있게 주입받는다. */
+  getHost: () => string = hostname,
+): string | undefined {
+  const explicit = args.label?.trim();
+  if (explicit) return explicit.slice(0, LABEL_MAX);
+  let host = "";
+  try {
+    host = getHost().trim();
+  } catch {
+    return undefined;   // 못 알아냈다 ≠ 빈 이름이다
+  }
+  return host ? host.slice(0, LABEL_MAX) : undefined;
 }
 
 function fail(msg: string): number {
