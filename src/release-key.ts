@@ -68,15 +68,27 @@
  * ⇒ The query samples **every paired agent**, not the ones that open sessions. All of it pushes
  * readiness down, so the conclusion holds.
  *
- * 🔴 **And the staleness is NOT measurable today — an earlier version of this paragraph said it
- * was, twice, in two different wordings.** First "rows whose `cliVersion` has not moved since
- * pairing", then "since its `lastSeenAt`". Measured on briefick `main` (`[metapass-saas]`, review
- * of #22): `lastSeenAt` is written **only by `agent/register`** — `session/start` writes
- * `cliVersion` and does not touch a timestamp. So comparing the two separates nothing: *"ran
- * recently and reported the same version"* and *"never ran since pairing"* look identical.
- * ⇒ `AgentToken` has **no column marking recent activity**, so there is no instrument. Saying
- * there is one is the failure this whole paragraph exists to prevent, and I wrote it — the claim
- * started as mine, briefick sharpened it, and it was still false when measured.
+ * ⚠️ **Whether the staleness is measurable is OPEN, and two peers who both measured disagree.**
+ * The instrument would be a row whose `cliVersion` has not moved since its last activity, so it
+ * turns on whether briefick maintains an activity timestamp:
+ *
+ * ```
+ * [metapass-saas]  lastSeenAt is written only by agent/register; session/start writes
+ *                  cliVersion and touches no timestamp   ⇒ no instrument
+ * [Briefick]       agent-seen.ts writes it, called from agent-auth and session/complete
+ *                  ⇒ it does move on activity
+ * ```
+ *
+ * ⇒ Both looked at briefick `main`; neither has been reconciled. The likely discriminator is
+ * **scope**: a grep over route files finds only `register`'s inline use, while the writer lives in
+ * a helper — and metapass's own note ("inside a `seen` object") points at that indirection. **This
+ * repository cannot settle it**; there is no briefick checkout here.
+ *
+ * 🔴 This paragraph has now claimed the instrument exists (twice, in two wordings) and that it
+ * does not (once) — **three assertions, all written before anyone opened the helper.** Each was
+ * more specific than the last, which is what made each one read as checked. ⇒ Until someone reads
+ * `agent-seen.ts`, the honest state is that **the rotation has no completion condition we have
+ * agreed on**, which is the operative fact regardless of which measurement holds.
  *
  * 📌 It is #24's finding one level up: **a value written once and read as current.** #24 fixed the
  * *write* (`startSession` reports too); the *query* still has to account for writes that have not
