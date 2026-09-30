@@ -15,8 +15,23 @@
  * 🔴 **"Let it propagate" is the one step with no completion condition**, and it is the step the
  * whole plan turns on — switching too early strands every install that missed the window, and the
  * failure is silent until the day they upgrade, where it looks like a corrupted download
- * (`[metapass-saas]`, review of #22: this is what has blocked their own key rotation — not the
- * crypto, and not a decision, but having no way to measure what is installed).
+ * (`[metapass-saas]`, review of #22).
+ *
+ * ⚠️ An earlier version of this paragraph added *"this is what has blocked their own key
+ * rotation — not the crypto, and not a decision, but having no way to measure what is
+ * installed"*. **That was false about them.** Their review said the step has no completion
+ * condition **in this plan**; I turned it into a claim about their rotation, which is a different
+ * key (an Android app signing key, not a release signing key), a different procedure, and a
+ * different blocker — comparing certificate fingerprints against Play Console lists, which needs
+ * console access nobody here has. Propagation measurement is not in front of it; that procedure
+ * has no "what fraction of installs" question at all. It read as corroboration from a second site
+ * and there was no second site.
+ *
+ * 🔴 The retraction stays here because the first attempt to make it did not reach the file: the
+ * edit script wrote twice from the same unmodified source, so the second write discarded the
+ * first, and both steps printed success (`0ae6db2` — the commit title claims a retraction the
+ * diff does not contain). Caught by `[metapass-saas]` re-reading the head instead of the
+ * changelog, after I reported it done twice.
  *
  * ⇒ The instrument, if it exists, is **not in this repository**: agents register with briefick,
  * so a version recorded on that row turns *"what fraction is at or past the intermediate release"*
