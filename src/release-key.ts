@@ -48,9 +48,15 @@
  *
  * ⚠️ **And even then the query samples agents that open sessions with briefick, not installs.** An
  * agent installed and never paired, or paired and idle, is absent from it. ⇒ Among agents that do
- * open sessions the fraction is **the measurement**; as a statement about **installs** it is an
- * upper bound, and the gap is every agent that never appears (`[Briefick]`, review of #22 —
- * correcting an earlier version that attached "upper bound" to the wrong population).
+ * open sessions the fraction is **the measurement**; as a statement about **installs** it is a
+ * *likely* upper bound, and the gap is every agent that never appears (`[Briefick]`, review of #22
+ * — correcting an earlier version that attached "upper bound" to the wrong population).
+ *
+ * ⚠️ *Likely*, not derived: it holds only if agents that never open a session are **no newer** than
+ * those that do, which is plausible (they have not run) and is not measured. A batch installed
+ * yesterday and never paired would be the newest software in the estate and absent from the
+ * number — and then the measurement is a **lower** bound. ⇒ On rotation day the direction of the
+ * error is what matters, so this presumption has to be stated rather than carried.
  *
  * ⚠️ **Compromise is out of scope, deliberately.** The plan above needs a release signed by the
  * old key, which an attacker holding that key can also produce. Under compromise there is no
