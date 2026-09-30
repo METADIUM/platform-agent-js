@@ -34,16 +34,18 @@ describe("service paths other repositories serve", () => {
     expect(DEFAULT_SERVICE.retrievePath).toBe("/api/agent/delegation/retrieve");
   });
 
-  it("🔴 the PoP audiences are part of the same contract — briefick verifies them", () => {
-    // A PoP audience mismatch fails *after* a successful HTTP round trip, so briefick's probe
-    // (which uses a stub that does not verify PoP) cannot see it. This side is the only guard.
-    expect(DEFAULT_SERVICE.popAudience).toMatchObject({
-      register: expect.any(String),
-      retrieve: expect.any(String),
-      session: expect.any(String),
+  it("🔴 the PoP audiences match the strings briefick verifies against", () => {
+    // A PoP audience mismatch fails *after* a successful HTTP round trip: status 2xx, path
+    // correct, briefick's probe green, registration broken. This side is the only guard.
+    //
+    // 🔴 The values, not their shape. An earlier version asserted these were non-empty strings,
+    // which is true of every wrong value as well — briefick pointed out that it pins nothing
+    // (review of #23). They confirmed these three are byte-identical to the constants in
+    // briefick `src/lib/agent-did.ts`, checked against this CLI's published 0.5.6 dist.
+    expect(DEFAULT_SERVICE.popAudience).toEqual({
+      register: "briefick-agent-register",
+      retrieve: "briefick-agent-retrieve",
+      session: "briefick-agent-session",
     });
-    for (const [name, aud] of Object.entries(DEFAULT_SERVICE.popAudience)) {
-      expect(aud, `popAudience.${name} is empty`).not.toBe("");
-    }
   });
 });
