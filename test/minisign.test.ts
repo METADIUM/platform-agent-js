@@ -105,11 +105,42 @@ describe("rotation: a build trusts a list, not a key", () => {
     }
     expect(message).toContain("signed by key fc9149bf27cbb2aa");
     expect(message).toContain("brew install minisign");
-    expect(message).toContain("gh release download -R METADIUM/platform-agent-js");
+    expect(message).toContain("curl -fsSL -o install.sh");
+    // 🔴 The recovery path must not need a tool the stranded user may not have. `gh` needs a
+    // login for its API endpoints; `curl` needs nothing, and this repository is public.
+    expect(message).not.toContain("gh release download");
     expect(message).toContain("needs the minisign tool again");
   });
 
   it("🔴 refuses an empty trusted list rather than accepting anything", () => {
     expect(() => verifyContentAny(content, sig, [])).toThrow(MinisignError);
+  });
+});
+
+describe("the trust material the upgrade command actually hands over", () => {
+  it("🔴 passes EVERY trusted key, not just the signing one", async () => {
+    // 🔴 The rotation plan is one subscript away from being undone. `[MINISIGN_PUBLIC_KEYS[0]]`
+    // instead of the list leaves a binary unable to accept a release signed by the next key —
+    // the exact failure the list exists to prevent — and it left all 153 tests green until this
+    // one existed ([Briefick], review of #22).
+    const { upgradeIo } = await import("../src/cli.js");
+    const { MINISIGN_PUBLIC_KEYS } = await import("../src/release-key.js");
+    const io = upgradeIo(() => {});
+    expect(io.publicKeyTexts).toEqual(MINISIGN_PUBLIC_KEYS);
+    expect(io.publicKeyTexts.length).toBe(MINISIGN_PUBLIC_KEYS.length);
+  });
+
+  it("🔴 follows the list when it grows — the control for the line above", async () => {
+    // Asserting equality against the same constant passes for a copy too. Move the original.
+    const { upgradeIo } = await import("../src/cli.js");
+    const keys = (await import("../src/release-key.js")).MINISIGN_PUBLIC_KEYS as string[];
+    const before = upgradeIo(() => {}).publicKeyTexts.length;
+    keys.push("untrusted comment: probe\nRWTKlL8ny0mh/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n");
+    try {
+      expect(upgradeIo(() => {}).publicKeyTexts.length).toBe(before + 1);
+    } finally {
+      keys.pop();
+    }
+    expect(upgradeIo(() => {}).publicKeyTexts.length).toBe(before);
   });
 });

@@ -11,7 +11,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MINISIGN_PUBLIC_KEYS } from "./release-key.js";
-import { downloadVerified, freeBytes, latestTag, planUpgrade } from "./upgrade.js";
+import { downloadVerified, freeBytes, latestTag, planUpgrade, type UpgradeIo } from "./upgrade.js";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { hostname } from "node:os";
@@ -464,6 +464,22 @@ async function httpBinary(url: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer());
 }
 
+/**
+ * The I/O and trust material `upgrade` hands to `downloadVerified`, in one testable place.
+ *
+ * 🔴 This was an inline object literal, and the line that matters most in it was untested:
+ * changing `MINISIGN_PUBLIC_KEYS` to `[MINISIGN_PUBLIC_KEYS[0]]` left **all 153 tests green**
+ * (`[Briefick]`, review of #22). That single subscript is the whole rotation plan — a binary that
+ * trusts only the first key cannot take a release signed by the next one, which is the failure the
+ * list exists to prevent, and it would first appear on a user's machine on the rotation day.
+ *
+ * ⚠️ Same shape as `agentClient()` on #24: an object built inline is invisible to every test that
+ * builds its own.
+ */
+export function upgradeIo(log: (line: string) => void = (l) => console.log(l)): UpgradeIo {
+  return { fetchText: httpText, fetchBinary: httpBinary, publicKeyTexts: MINISIGN_PUBLIC_KEYS, log };
+}
+
 export async function main(argv: string[]): Promise<number> {
   const args = parse(argv);
 
@@ -732,12 +748,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     console.log(`업그레이드: ${plan.from} → ${plan.to} (${plan.target})`);
     try {
-      await downloadVerified(plan, destination, {
-        fetchText: httpText,
-        fetchBinary: httpBinary,
-        publicKeyTexts: MINISIGN_PUBLIC_KEYS,
-        log: (l) => console.log(l),
-      });
+      await downloadVerified(plan, destination, upgradeIo());
     } catch (e) {
       return fail(e instanceof Error ? e.message : String(e));
     }

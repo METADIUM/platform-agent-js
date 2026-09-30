@@ -20,8 +20,15 @@
  *
  * ⇒ The instrument, if it exists, is **not in this repository**: agents register with briefick,
  * so a version recorded on that row turns *"what fraction is at or past the intermediate release"*
- * into a query. This CLI does not send one today. ⚠️ That field cannot be backfilled — it has to
- * be added before a rotation, not during one.
+ * into a query. This CLI sends one as of #24 — on `register` **and** on `startSession`, because
+ * `register` runs once per pairing and would have frozen the value at the version an agent was
+ * paired on. ⚠️ That field cannot be backfilled — it has to be added before a rotation, not during
+ * one.
+ *
+ * ⚠️ **And the query samples agents that open sessions with briefick, not installs.** An agent
+ * installed and never paired, or paired and idle, is absent from it — so the fraction it reports
+ * is an upper bound on readiness among active agents and says nothing about the rest
+ * (`[Briefick]`, review of #22).
  *
  * ⚠️ **Compromise is out of scope, deliberately.** The plan above needs a release signed by the
  * old key, which an attacker holding that key can also produce. Under compromise there is no

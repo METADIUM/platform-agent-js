@@ -110,7 +110,8 @@ export function verifyContentAny(content: Buffer, sig: MinisignSignature, keys: 
         `  The release signing key was rotated and this build predates it, so it cannot verify the new one.\n` +
         `  Recover by reinstalling — this needs the minisign tool again, which upgrade otherwise does not:\n` +
         `    brew install minisign   # or: apt install minisign / dnf install minisign\n` +
-        `    gh release download -R METADIUM/platform-agent-js --pattern install.sh -O install.sh && sh install.sh`,
+        `    curl -fsSL -o install.sh https://github.com/METADIUM/platform-agent-js/releases/latest/download/install.sh\n` +
+        `    sh install.sh`,
     );
   }
   const signed = sig.alg === "ED" ? createHash("blake2b512").update(content).digest() : content;
