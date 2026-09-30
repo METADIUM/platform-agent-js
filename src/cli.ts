@@ -9,7 +9,9 @@
  * 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
  */
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { MINISIGN_PUBLIC_KEY } from "./release-key.js";
+import { downloadVerified, freeBytes, latestTag, planUpgrade } from "./upgrade.js";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { hostname } from "node:os";
@@ -29,6 +31,8 @@ interface Args {
   /** 등록 시 서버에 보내는 표시 이름. 미지정이면 호스트 이름. */
   label?: string;
   cmd?: string;
+  /** `upgrade --check`: compare versions and print, download nothing. */
+  check?: boolean;
   /** 서브커맨드 (예: credentials clear / add·remove의 URL·alias). */
   sub?: string;
   url?: string;
@@ -92,6 +96,7 @@ function parse(argv: string[]): Args {
     else if (a === "--label") out.label = val();
     else if (a === "--insecure-no-token") out.insecureNoToken = true;
     else if (a === "--install") out.install = true;
+    else if (a === "--check") out.check = true;
     else if (a === "--uninstall") out.uninstallFlag = true;
     else if (a === "--force") out.force = true;
     else if (a === "-h" || a === "--help") out.cmd = "help";
@@ -365,8 +370,8 @@ export const helpText = (inv: string = invocation()): string => `platform-agent 
   ${inv} rotate-token      # ⚠ 회전 = 전 RP MCP 재등록 필요
   ${inv} up --install      # OS 데몬 설치+시작(launchd/systemd --user+linger)
   ${inv} down --uninstall  # OS 데몬 중지·제거
-  ${inv} upgrade           # 유닛 재설치(실행 라인 갱신)·재시작
-                                                       # ⚠ 판은 안 바뀐다 — 설치형은 install.sh 를 다시 돌려라
+  ${inv} upgrade           # 최신 릴리스로 «판을 올린다» (서명 검증 후 교체) + 유닛 재시작
+  ${inv} upgrade --check   # 받지 않고 판만 비교
 
 사용(단일 RP·저수준):
   ${inv} register --url <RP_URL> --code <PAIRING_CODE>
@@ -439,6 +444,24 @@ export function agentClient(baseUrl: string, key: AgentKey): BriefickAgentClient
  */
 export function mcpUrlFor(baseUrl: string, mcpPath?: string): string {
   return baseUrl.replace(/\/+$/, "") + (mcpPath ?? DEFAULT_SERVICE.mcpPath);
+}
+
+/**
+ * The two network calls `upgrade` makes. They live here, not in `upgrade.ts`, so that module stays
+ * testable without a network — every decision it makes is pure and only these touch the wire.
+ *
+ * ⚠️ `redirect: "follow"` matters: release asset URLs are 302s to a CDN.
+ */
+async function httpText(url: string): Promise<string> {
+  const res = await fetch(url, { redirect: "follow", headers: { "user-agent": "metapass-agent" } });
+  if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+  return res.text();
+}
+
+async function httpBinary(url: string): Promise<Buffer> {
+  const res = await fetch(url, { redirect: "follow", headers: { "user-agent": "metapass-agent" } });
+  if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -682,14 +705,51 @@ export async function main(argv: string[]): Promise<number> {
   //    **파일이 그대로 남아** 「업그레이드했는데 판이 그대로」가 된다(briefick 실측).
   //    ⇒ 이름이 부르는 기대와 하는 일이 달라서, 명령 자신이 그 차이를 말하게 한다.
   if (args.cmd === "upgrade") {
-    // 실행 라인(버전·경로)이 바뀌었을 수 있으므로 유닛 재설치 = 최신 실행 라인으로 재기동
+    // 🔴 이 명령은 한때 «판을 안 바꿨다» — 유닛만 갱신하고 파일은 그대로였다. 이제 파일을 바꾼다.
+    //    검증은 minisign 바이너리가 아니라 이 런타임이 한다(`src/minisign.ts` 참조).
+    const sea = isSeaBinary();
+    const current = packageVersion() ?? "0.0.0";
+    const tag = await latestTag({ fetchText: httpText });
+    const plan = planUpgrade({ sea, currentVersion: current, latestTag: tag });
+
+    if (plan.action === "not-a-binary") {
+      console.log(plan.message);
+      return 0;
+    }
+    if (plan.action === "up-to-date") {
+      console.log(`이미 최신입니다 — ${plan.version} (릴리스 ${tag})`);
+      return 0;
+    }
+    if (args.check) {
+      console.log(`업그레이드 가능: ${plan.from} → ${plan.to} (${plan.asset})`);
+      return 0;
+    }
+
+    const destination = process.execPath;
+    const free = freeBytes(dirname(destination));
+    if (free !== undefined && free < 300 * 1024 * 1024) {
+      return fail(`여유 공간이 부족합니다 (${Math.round(free / 1048576)} MB) — 교체에 약 300 MB 필요`);
+    }
+    console.log(`업그레이드: ${plan.from} → ${plan.to} (${plan.target})`);
+    try {
+      await downloadVerified(plan, destination, {
+        fetchText: httpText,
+        fetchBinary: httpBinary,
+        publicKeyText: MINISIGN_PUBLIC_KEY,
+        log: (l) => console.log(l),
+      });
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e));
+    }
+    console.log(`  ✅ 교체 완료: ${destination}`);
+
+    // 실행 라인이 바뀌었을 수 있으므로 유닛 재설치 = 새 바이너리로 재기동
     const dir0 = configDir(args.keyFile);
     const r = installUnit(join(dir0, "daemon.log"));
     console.log(`✅ 유닛 재설치·재시작(${r.kind}): ${r.unitPath}`);
     for (const n of r.notes) console.log("  " + n);
-    // 🔴 이름이 «판을 올린다» 로 읽히는데 이 명령은 **유닛만** 만진다. 그 차이를 여기서 말한다.
-    console.log("  ⚠️ 판은 안 바뀌었다 — 이 명령은 유닛(실행 라인)만 갱신한다.");
-    console.log("     설치형(단일 바이너리)이면 install.sh 를 다시 돌려야 파일이 교체된다.");
+    console.log("  ⚠️ launchctl/systemctl 에 OS_REASON_CODESIGNING 이 찍힐 수 있다 — 정상이다.");
+    console.log("     옛 프로세스를 OS 가 정리한 기록이고, state=running 과 포트 LISTEN 으로 판단한다.");
     return 0;
   }
 
