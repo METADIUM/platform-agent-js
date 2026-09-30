@@ -66,9 +66,17 @@
  * *overstated* the error; it is only "frozen at pairing" for an agent that never opened a session.
  *
  * ⇒ The query samples **every paired agent**, not the ones that open sessions. All of it pushes
- * readiness down, so the conclusion holds — but the staleness is **measurable** and this paragraph
- * used to treat the whole error as unmeasurable. The identifying mark is a row whose `cliVersion`
- * has not moved since its `lastSeenAt`, not since pairing.
+ * readiness down, so the conclusion holds.
+ *
+ * 🔴 **And the staleness is NOT measurable today — an earlier version of this paragraph said it
+ * was, twice, in two different wordings.** First "rows whose `cliVersion` has not moved since
+ * pairing", then "since its `lastSeenAt`". Measured on briefick `main` (`[metapass-saas]`, review
+ * of #22): `lastSeenAt` is written **only by `agent/register`** — `session/start` writes
+ * `cliVersion` and does not touch a timestamp. So comparing the two separates nothing: *"ran
+ * recently and reported the same version"* and *"never ran since pairing"* look identical.
+ * ⇒ `AgentToken` has **no column marking recent activity**, so there is no instrument. Saying
+ * there is one is the failure this whole paragraph exists to prevent, and I wrote it — the claim
+ * started as mine, briefick sharpened it, and it was still false when measured.
  *
  * 📌 It is #24's finding one level up: **a value written once and read as current.** #24 fixed the
  * *write* (`startSession` reports too); the *query* still has to account for writes that have not
