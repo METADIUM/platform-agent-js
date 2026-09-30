@@ -69,10 +69,17 @@
  * readiness down, so the conclusion holds.
  *
  * 🟢 **The instrument exists; nobody has written the query.** `lastSeenAt` moves when an agent
- * runs — `recordAgentSeen()` in briefick `src/lib/agent-seen.ts` writes it, called from
- * `agent-auth.ts` (MCP auth, throttled to 5 minutes) and from `session/complete`, as well as at
- * register (`[metapass-saas]`, retracting their own review of #22 after `[Briefick]` found the
- * writer they had missed).
+ * runs, and it has **two writers on two paths** — which is the distinction every version of this
+ * paragraph has so far got wrong in one direction or the other:
+ *
+ * ```
+ * recordAgentSeen()   agent-seen.ts:23        called from agent-auth.ts ×2, session/complete ×2
+ * inline write        register/route.ts:55    ip ? { registeredIp, lastSeenIp, lastSeenAt } : {}
+ * ```
+ *
+ * `[Briefick]` found the helper `[metapass-saas]` had missed; `[metapass-saas]` then found the
+ * second writer that the correction had folded into the first (*« as well as at register »*
+ * attributed an inline write to the helper).
  *
  * 🟡 **But the two facts are written by different paths and do not imply each other.**
  * `recordAgentSeen()` is **not** called from `session/start`, which is where `version` arrives. So
@@ -80,14 +87,28 @@
  * over `(cliVersion, lastSeenAt)` that would actually identify a stale row is **not established** —
  * what is established is only that the column exists.
  *
- * ⚠️ And the column's own limits, measured in code and in production (`[Briefick]`, 2026-09-30):
+ * ⚠️ The limits below are the **helper's**. The register path shares exactly one of them, so a
+ * query that applies these four to every row is wrong about the agents that re-pair
+ * (`[Briefick]` measured the helper in code and in production, `[metapass-saas]` the split,
+ * 2026-09-30 — neither is checkable from this repo, which has no briefick checkout):
  *
  * ```
- * written only on the delegated-session branch   a static-token agent (bfk_agt_) never records
- * 5-minute throttle                              resolution, not a timestamp of the last call
- * skipped when there is no client IP             those requests leave no mark at all
- * failures are swallowed                         a write that did not happen looks like inactivity
+ *                              recordAgentSeen()   register inline
+ * delegated-session branch only      yes           n/a — register opens no session
+ * 5-minute throttle                  yes           NO — every re-register writes
+ * no client IP → skip                yes           yes
+ * failure swallowed                  yes           no — part of the main update
  * ```
+ *
+ * ⇒ So *« a static-token agent (`bfk_agt_`) never records »* — what this block said until
+ * `[metapass-saas]` checked it — is **false**. `agent-auth.ts:56` does show the static-token branch
+ * skipping the helper, but a static-token agent that **re-registers** writes `lastSeenAt` inline and
+ * unthrottled. A query built on the old wording would have excluded the entire static-token
+ * population, including exactly the ones that have re-paired.
+ *
+ * ⚠️ The four limits still hold for the helper, and each is a way a missing value can mean
+ * nothing: the throttle makes it a resolution rather than a last-call timestamp, no client IP leaves
+ * no mark at all, and a swallowed failure looks the same as inactivity.
  *
  * ⇒ So *"has not been seen"* and *"is not tracked"* are the same reading of a missing value, which
  * is the shape this whole file keeps running into. Any query built on this has to say which one it
@@ -101,6 +122,13 @@
  * repo for a writer"*, and what arrived here was *"there is no instrument"*, flat, with their name
  * on it. ⇒ Same failure as the rotation parenthesis at the top of this file, with the roles
  * reversed.
+ *
+ * 📌 And the shape of the corrections is itself the finding (`[metapass-saas]`, approving #22):
+ * five versions, each one more specific than the last, each checked by one more person — and the
+ * error surviving each round in the corner that round did not look at, because **a statement gets
+ * re-read for the thing it was last wrong about.** ⚠️ The structural cause is that this paragraph
+ * describes another repository, where nothing here can turn it red; the durable fix is to move it to
+ * `platform-docs` and leave one line pointing at it, not a sixth revision.
  *
  * 📌 It is #24's finding one level up: **a value written once and read as current.** #24 fixed the
  * *write* (`startSession` reports too); the *query* still has to account for writes that have not
