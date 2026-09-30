@@ -10,8 +10,24 @@
  * ⇒ To rotate: add the new key to this list, ship a release signed by the **current** key, let it
  * propagate, and only then start signing with the new one. Binaries that took the intermediate
  * release accept both; binaries older than it still cannot, and for those `install.sh` is the only
- * route — which is why the intermediate release has to go out **before** the old key is retired,
- * not after it is compromised.
+ * route.
+ *
+ * 🔴 **"Let it propagate" is the one step with no completion condition**, and it is the step the
+ * whole plan turns on — switching too early strands every install that missed the window, and the
+ * failure is silent until the day they upgrade, where it looks like a corrupted download
+ * (`[metapass-saas]`, review of #22: this is what has blocked their own key rotation — not the
+ * crypto, and not a decision, but having no way to measure what is installed).
+ *
+ * ⇒ The instrument, if it exists, is **not in this repository**: agents register with briefick,
+ * so a version recorded on that row turns *"what fraction is at or past the intermediate release"*
+ * into a query. This CLI does not send one today. ⚠️ That field cannot be backfilled — it has to
+ * be added before a rotation, not during one.
+ *
+ * ⚠️ **Compromise is out of scope, deliberately.** The plan above needs a release signed by the
+ * old key, which an attacker holding that key can also produce. Under compromise there is no
+ * intermediate release anyone can trust, every install is stranded, and `install.sh` is the only
+ * route **for everyone** — not just for builds older than the intermediate. Stated because the
+ * person reading this during an incident is reading it to find out whether there is a plan.
  *
  * ⚠️ `test/release-key.test.ts` asserts the first entry is byte-identical to `minisign.pub`, so a
  * rotation that edits one place and not the other is a red test rather than a binary that refuses
