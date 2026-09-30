@@ -46,17 +46,33 @@
  * whole population a rotation is about (`[metapass-saas]`, review of #22; the fix is #24, which
  * also sends it on `startSession`).
  *
- * ⚠️ **And even then the query samples agents that open sessions with briefick, not installs.** An
- * agent installed and never paired, or paired and idle, is absent from it. ⇒ Among agents that do
- * open sessions the fraction is **the measurement**; as a statement about **installs** it is a
- * *likely* upper bound, and the gap is every agent that never appears (`[Briefick]`, review of #22
- * — correcting an earlier version that attached "upper bound" to the wrong population).
+ * ⚠️ **And even then the query has two different errors in it, and only one is a gap.**
+ * `cliVersion` is a column on briefick's `AgentToken`, so **every paired agent has a row** whether
+ * or not it opens sessions (`[metapass-saas]`, review of #22, correcting an earlier version of
+ * this paragraph — and the `[Briefick]` correction it came from — which called paired-and-idle
+ * agents absent):
  *
- * ⚠️ *Likely*, not derived: it holds only if agents that never open a session are **no newer** than
- * those that do, which is plausible (they have not run) and is not measured. A batch installed
- * yesterday and never paired would be the newest software in the estate and absent from the
- * number — and then the measurement is a **lower** bound. ⇒ On rotation day the direction of the
- * error is what matters, so this presumption has to be stated rather than carried.
+ * ```
+ * never paired          no row      absent            ← the gap
+ * paired, then idle     ROW EXISTS  frozen at pairing ← wrong data being counted
+ * paired + sessions     ROW EXISTS  current
+ * ```
+ *
+ * ⇒ The query samples **every paired agent**, not the ones that open sessions. Both errors push
+ * readiness down, so the conclusion holds — but the second is **measurable** and this paragraph
+ * used to treat the whole error as unmeasurable. briefick can identify rows whose `cliVersion`
+ * has not moved since pairing, and `lastSeenAt` already exists.
+ *
+ * 📌 It is #24's finding one level up: **a value written once and read as current.** #24 fixed the
+ * *write* (`startSession` reports too); the *query* still has to account for writes that have not
+ * recurred yet.
+ *
+ * ⚠️ And the remaining gap is a *likely* upper bound, not a derived one: it holds only if agents
+ * that never paired are **no newer** than those that did, which is plausible and is not measured.
+ * A batch installed yesterday and never paired would be the newest software in the estate and
+ * absent from the number — and then the measurement is a **lower** bound (`[Briefick]`, review of
+ * #22). ⇒ On rotation day the direction of the error is the whole question, so the presumption is
+ * stated rather than carried.
  *
  * ⚠️ **Compromise is out of scope, deliberately.** The plan above needs a release signed by the
  * old key, which an attacker holding that key can also produce. Under compromise there is no

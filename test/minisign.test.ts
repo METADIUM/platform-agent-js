@@ -119,6 +119,12 @@ describe("rotation: a build trusts a list, not a key", () => {
 
 describe("the trust material the upgrade command actually hands over", () => {
   it("🔴 passes EVERY trusted key, not just the signing one", async () => {
+    // ⚠️ **This assertion is asleep while the list has one element.** `[MINISIGN_PUBLIC_KEYS[0]]`
+    // and `MINISIGN_PUBLIC_KEYS` are then the same value, so the sabotage that matters passes here
+    // and only the control below catches it (`[metapass-saas]`, review of #22, who measured it).
+    // ⇒ It wakes on the day a second key is added — which is rotation day, the day this file gets
+    // edited under pressure. Not fixed with a fabricated second key: a key in the production
+    // trust list that exists to keep a test honest is a real thing shipped for a test's sake.
     // 🔴 The rotation plan is one subscript away from being undone. `[MINISIGN_PUBLIC_KEYS[0]]`
     // instead of the list leaves a binary unable to accept a release signed by the next key —
     // the exact failure the list exists to prevent — and it left all 153 tests green until this
