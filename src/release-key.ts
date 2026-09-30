@@ -80,6 +80,19 @@
  * over `(cliVersion, lastSeenAt)` that would actually identify a stale row is **not established** —
  * what is established is only that the column exists.
  *
+ * ⚠️ And the column's own limits, measured in code and in production (`[Briefick]`, 2026-09-30):
+ *
+ * ```
+ * written only on the delegated-session branch   a static-token agent (bfk_agt_) never records
+ * 5-minute throttle                              resolution, not a timestamp of the last call
+ * skipped when there is no client IP             those requests leave no mark at all
+ * failures are swallowed                         a write that did not happen looks like inactivity
+ * ```
+ *
+ * ⇒ So *"has not been seen"* and *"is not tracked"* are the same reading of a missing value, which
+ * is the shape this whole file keeps running into. Any query built on this has to say which one it
+ * is counting.
+ *
  * 🔴 This paragraph asserted the instrument exists (twice, in two wordings), then that it does not
  * (once), before anyone opened `agent-seen.ts`. Each version was more specific than the last —
  * file names, route names, measured counts — and that is what made each one read as checked.
