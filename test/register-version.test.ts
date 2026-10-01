@@ -136,14 +136,14 @@ describe("the version this CLI reports on register", () => {
     // while briefick stored it happily — a false red, the mirror of the silent drop this file
     // guards against.
     //
-    // 🔴 **Merge `briefick#48` first, or together.** Notification is not ordering
-    // (`[metapass-saas]`, review of #25), and the two orders fail differently:
-    //   #48 first   they accept more, this copy still rejects  → FALSE RED here. Loud, safe.
-    //   #25 first   this accepts, they reject                  → CLI sends, briefick SILENTLY
-    //               drops, and this side is green — the exact failure this file exists to stop.
-    // ⬜ Latent today: it needs a `package.json` version carrying a prerelease AND build metadata
-    // between the two merges, and it is `0.5.6`. Written down because the order is free to get
-    // right now and not free later.
+    // 📌 The merge order is settled — this records why it was chosen, it is not a pending
+    // instruction (`[metapass-saas]`, review of #25). `briefick#48` went first (`e782df4e`) and
+    // reached production on 2026-10-01; this copy followed. The asymmetry is the reason, and it
+    // outlives the decision:
+    //   widen THEM first   they accept more, this copy still rejects  → FALSE RED here. Loud, safe.
+    //   widen US first     this accepts, they reject                  → CLI sends, briefick SILENTLY
+    //                      drops, and this side is green — the failure this file exists to stop.
+    // ⇒ Whenever the two rules move again, widen briefick first and narrow this side first.
     expect("1.2.3-rc.1+build.5").toMatch(BRIEFICK_SEMVER);
     expect("1.2.3-0.3.7+build.11.e0f985a").toMatch(BRIEFICK_SEMVER);
   });
