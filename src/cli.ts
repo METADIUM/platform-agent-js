@@ -313,6 +313,19 @@ function formatLeft(ms: number): string {
  * approved at 03:06 and 03:14 both reached `delivered`, and `retrieve` was called **0 times**
  * while `session/start` and `complete` kept returning 200 on the cached grant.
  *
+ * ⚠️ **This runs for every configured RP, not only the one that reported the bug.** The interval
+ * is picked to fit briefick's 10-minute badge because that is the tightest constraint known — not
+ * because it is a briefick setting. And {@link isReplacement} keys on the credential rather than a
+ * status word, because mini-paas spells the same success `retrieved` where briefick spells it
+ * `delivered`; requiring one word made this silently never collect on the other RP.
+ *
+ * ⬜ Not every RP can run this daemon today. mini-paas implements the register contract explicitly
+ * (`backend/models/schemas.py`: *"Compatible with the @metadium-did/platform-agent-js contract"*)
+ * but has **no** `session/start`, `session/complete` or `/api/mcp` — 0 occurrences repo-wide,
+ * 2026-10-01 — and its retrieve is `GET ?nonce=&secret=` rather than `POST {didJwk, pop}`. So this
+ * loop cannot reach it yet; against such an RP the call fails, counts as a failure, and backs off
+ * to the ceiling, which is the safe direction.
+ *
  * ⚠️ Only runs while connected. If `auth` is null, {@link connectTarget} is already sitting in
  * `waitCredential` polling the same endpoint — two callers would race for one `delivered`
  * credential, and whichever lost would see it consumed with nothing to show for it.
