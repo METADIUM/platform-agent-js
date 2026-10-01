@@ -33,6 +33,12 @@ describe("pointers into platform-docs", () => {
     }
   });
 
+  // 🔴 In CI this is a NOTICE, not a gate: there is no platform-docs checkout there, so a green CI
+  //    run does NOT mean the pointers resolve. It is a gate only on a machine with the sibling
+  //    layout. Do not cite the suite passing in CI as evidence that these documents exist.
+  //    (`[minipaas]`, review of platform-docs#4, who also declined the obvious fix — making CI fetch
+  //    platform-docs would add a network dependency to the suite, the same cost they turned down for
+  //    their own wire-surface check.)
   it("the documents those pointers name exist", () => {
     if (!existsSync(PLATFORM_DOCS)) {
       // Not a silent pass: CI has no platform-docs checkout, so resolution is only ever measured on

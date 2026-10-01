@@ -82,6 +82,9 @@ jobs:
             console.log("  `git merge-base --is-ancestor <widening> <running>` in the receiver's repo.");
             console.log("NOT CHECKED: any receiver the line does not name. Independent installs are");
             console.log("  unconfirmed by construction — see platform-docs/43 section 2.3.");
+            console.log("NOT CHECKED: that a confirmation HAPPENED. This gate measures that a line");
+            console.log("  exists and is well-formed. The sha and date make it re-checkable by a");
+            console.log("  third party against the receiver; they do not make it true.");
           '
         env:
           GH_TOKEN: ${{ github.token }}
