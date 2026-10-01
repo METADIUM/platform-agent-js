@@ -34,16 +34,29 @@
  * telling the user to throw away a delegation the daemon was about to collect by itself. That is
  * the expensive direction of a wrong message (`[Briefick]`, review of #29).
  *
- * ⇒ The check must land **inside** their badge window, not outside it. At 5 minutes a healthy
- * agent always collects before the badge can fire, so briefick needs no version-conditional logic,
- * and the badge keeps meaning what it says: *this agent is not collecting* — which, on this
- * version, is true only when the loop is backing off or failing, and `credentials clear` is then
- * reasonable advice because it routes through `connectTarget` instead.
+ * ⇒ The check must land **inside** their badge window, not outside it. A healthy agent always
+ * collects before the badge can fire, so briefick needs no version-conditional logic, and the badge
+ * keeps meaning what it says: *this agent is not collecting* — true, on this version, only when
+ * the loop is backing off or failing.
  *
- * ⚠️ The cost is small enough to measure rather than argue about: 12 calls/hour/RP, against the
- * ~20/hour of `session/start` + `complete` that pmvm-02 was already making.
+ * 🔴 **Lowered 5m → 1m** because 5 minutes could not be called "immediate" and the first fix
+ * proposed for that did not work. The idea was to poll fast while the RP reports `pending`, since
+ * `lastRequest` already says a user is approving — but **learning that a request is pending happens
+ * on the same slow tick**. By the time the tick lands, the approval has usually completed and the
+ * answer is already `delivered`. ⇒ The signal is in the response and arrives too late to act on;
+ * only the interval itself moves the worst case (`[Briefick]`, who refuted it with the numbers:
+ * the approval window is 300s, and issue→approve is typically tens of seconds).
+ *
+ * ⚠️ The cost, measured rather than argued: **60 calls/hour/RP**, up from 12, against the
+ * ~20/hour of `session/start` + `complete` that pmvm-02 was already making. Worst case to collect
+ * a newly approved delegation drops from ~5 minutes to ~1.
+ *
+ * 📌 Long-polling would give seconds instead of a minute, and was not taken: it needs changes on
+ * both sides, holds a connection open per agent, and makes proxy read timeouts a shared concern.
+ * Its advantage over this is only visible to someone watching the agent in the seconds after
+ * approving, and **nobody has measured how often that happens**.
  */
-export const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5m
+export const CHECK_INTERVAL_MS = 60 * 1000; // 1m
 
 /**
  * Never check more often than this — clamped in {@link nextCheckDelayMs}, not merely asserted.
@@ -51,8 +64,13 @@ export const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5m
  * ⚠️ Not binding today ({@link CHECK_INTERVAL_MS} is above it). It exists so that a later edit to
  * the interval or the backoff curve cannot produce a hot loop against someone else's service.
  * ⚠️ A delay computed anywhere other than {@link nextCheckDelayMs} is still outside this floor.
+ *
+ * 🔴 **Kept strictly below {@link CHECK_INTERVAL_MS}, and a test pins that.** When the interval
+ * dropped to 1m this was also 1m, which would have made them equal — and then anyone lowering the
+ * interval further gets **silently clamped back up** and cannot see that their change did nothing.
+ * The floor is meant to stop a hot loop, not to quietly override a deliberate edit.
  */
-export const MIN_CHECK_INTERVAL_MS = 60 * 1000; // 1m
+export const MIN_CHECK_INTERVAL_MS = 15 * 1000; // 15s
 
 /** Backoff ceiling — a persistently failing agent still asks, but rarely. */
 export const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000; // 6h
