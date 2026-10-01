@@ -856,8 +856,16 @@ export async function main(argv: string[]): Promise<number> {
     const r = installUnit(join(dir0, "daemon.log"));
     console.log(`✅ 유닛 재설치·재시작(${r.kind}): ${r.unitPath}`);
     for (const n of r.notes) console.log("  " + n);
-    console.log("  ⚠️ launchctl/systemctl 에 OS_REASON_CODESIGNING 이 찍힐 수 있다 — 정상이다.");
-    console.log("     옛 프로세스를 OS 가 정리한 기록이고, state=running 과 포트 LISTEN 으로 판단한다.");
+    // ⚠️ `OS_REASON_CODESIGNING` and `KeepAlive` are launchd words. On Linux this warned about
+    //    something that cannot happen and named a mechanism systemd does not have
+    //    (`[Briefick]`, 2026-10-01, after installing on pmvm-02). `r.kind` already says which
+    //    installer ran — the information was there and the message ignored it.
+    if (r.kind === "launchd") {
+      console.log("  ⚠️ launchctl 에 OS_REASON_CODESIGNING 이 찍힐 수 있다 — 정상이다.");
+      console.log("     옛 프로세스를 OS 가 정리한 기록이고, state=running 과 포트 LISTEN 으로 판단한다.");
+    } else {
+      console.log("  확인: systemctl --user status metapass-agent-proxy.service — state=running 과 포트 LISTEN 으로 판단한다.");
+    }
     return 0;
   }
 

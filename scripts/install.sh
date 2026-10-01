@@ -310,13 +310,27 @@ _staged="$DEST/.metapass-agent.new.$$"   # `_cleanup` above removes it — do no
 install -m 0755 "$TMP/metapass-agent" "$_staged"
 mv -f "$_staged" "$DEST/metapass-agent"
 echo "✅ Installed: $DEST/metapass-agent ($VERSION, signature verified)"
+# ⚠️ Platform-specific. `OS_REASON_CODESIGNING` and `KeepAlive` are **launchd** words; printing
+#    them on Linux warns about something that cannot happen there and names a mechanism systemd
+#    does not have (`[Briefick]`, after installing on pmvm-02). Each platform gets its own note.
 if [ "$HAD_OLD" = 1 ]; then
-  cat <<'NOTE'
-  ⚠️ If you were running the daemon, launchctl/systemctl may show
+  case "$TARGET" in
+    darwin-*)
+      cat <<'NOTE'
+  ⚠️ If you were running the daemon, launchctl may show
      last exit reason = OS_REASON_CODESIGNING — **this is normal.**
      It records the OS cleaning up the old running process, and KeepAlive restarts it immediately.
      Judge by **state = running and the port LISTENing**, not by that line.
 NOTE
+      ;;
+    linux-*)
+      cat <<'NOTE'
+  ⚠️ Replacing the binary does not restart a running service by itself.
+     Run `metapass-agent up --install` to pick it up — from 0.5.9 that restarts the unit.
+     Check with: systemctl --user status metapass-agent-proxy.service
+NOTE
+      ;;
+  esac
 fi
 echo "Next:"
 echo "  $DEST/metapass-agent add <RP_URL> --code <CODE>"

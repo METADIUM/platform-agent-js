@@ -51,6 +51,22 @@
  * ~20/hour of `session/start` + `complete` that pmvm-02 was already making. Worst case to collect
  * a newly approved delegation drops from ~5 minutes to ~1.
  *
+ * 🔴 **Why 60/hour is acceptable — and what nobody measured.** The number sat here with no basis
+ * recorded, so anyone wanting to halve the interval again had nothing to weigh (`[Briefick]` asked
+ * for this and held the promise while it was deferred):
+ *
+ * ```
+ * measured (briefick, 2026-10-01)   load 0.24 · /api 872 requests that day (≈145/h, all traffic)
+ *                                   retrieve observed on the 5-minute cadence in production
+ * NOT measured                      cost per request — their nginx logs carry no response time
+ * judgement, NOT a measurement      fine up to ~100 agents (≈1.7 req/s; PoP verify plus 2–4
+ *                                   indexed reads, no outbound calls)   — **[Briefick]'s judgement**
+ * ```
+ *
+ * ⚠️ So the headroom is an estimate by the party that carries the load, not a benchmark. If the
+ * agent count approaches that figure, or the interval is cut again, **the per-request cost is the
+ * thing to measure first** — it is the term nobody has.
+ *
  * 📌 Long-polling would give seconds instead of a minute, and was not taken: it needs changes on
  * both sides, holds a connection open per agent, and makes proxy read timeouts a shared concern.
  * Its advantage over this is only visible to someone watching the agent in the seconds after
