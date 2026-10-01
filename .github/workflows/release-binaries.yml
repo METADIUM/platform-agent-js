@@ -34,6 +34,11 @@ jobs:
       - name: Gate — the release declares its compatibility class
         run: |
           set -euo pipefail
+          # 🔴 Read the body LIVE, not from `github.event.release.body`. A **Re-run** replays the
+          #    ORIGINAL event payload, so an author who adds the line and clicks "Re-run jobs"
+          #    would stay red and be blamed for a line they did write ([Briefick], review of #34).
+          RELEASE_BODY=$(gh release view "${{ github.event.release.tag_name }}" --json body -q .body)
+          export RELEASE_BODY
           node --input-type=module -e '
             const { AGENT_COMPAT } = await import("./dist/wire-surface.js");
             const { readFileSync } = await import("node:fs");
@@ -52,12 +57,19 @@ jobs:
             // window, and other organisations run their own installs. So the gate requires the
             // release notes to say which receiver was confirmed, at what version.
             const body = process.env.RELEASE_BODY ?? "";
-            if (!/^\s*receiver-confirmed:\s*\S+/mi.test(body)) {
+            // Requires a receiver, a commit sha and a date, so `receiver-confirmed: TODO` does not
+            // pass; the optional bullet accepts the markdown form ([Briefick], review of #34).
+            const CONFIRMED = /^\s*(?:[-*]\s+)?receiver-confirmed:\s*\S+\s+[0-9a-f]{7,40}\s+on\s+\d{4}-\d{2}-\d{2}/mi;
+            if (!CONFIRMED.test(body)) {
               console.error(`agentCompat = ${c} requires the receiver to be confirmed BEFORE this release.`);
-              console.error("  Add a line to the release notes, e.g.:");
-              console.error("    receiver-confirmed: briefick <commit from /api/version> on <date>");
-              console.error("  See platform-docs/43-agent-cli-wire-compatibility.md section 2.3 —");
-              console.error("  an RP that cannot be queried has no safe release order at all.");
+              console.error("  Add a line to the release notes and RE-PUBLISH (a workflow Re-run");
+              console.error("  replays the old payload; this gate re-reads live, but re-publish is safer):");
+              console.error("    receiver-confirmed: briefick 30cf66f on 2026-10-01");
+              console.error("  The commit must CONTAIN the widening, not merely be newer:");
+              console.error("    git merge-base --is-ancestor <widening> <running>   # in the receiver repo");
+              console.error("  If the receiver cannot be queried at all, do not force this: re-cut the");
+              console.error("  change as `additive` (new field beside the old one) — nothing needs ordering.");
+              console.error("  See platform-docs/43-agent-cli-wire-compatibility.md section 2.3.");
               process.exit(1);
             }
             console.log("receiver confirmation present in the release notes.");
@@ -66,9 +78,13 @@ jobs:
             // `coexists: true` recorded against it falsely. Green means the declared class was
             // handled, not that it was declared correctly.
             console.log(`NOT CHECKED: that ${c} is the correct class for this change. Nothing can.`);
+            console.log("NOT CHECKED: that the named commit CONTAINS the widening — confirm with");
+            console.log("  `git merge-base --is-ancestor <widening> <running>` in the receiver's repo.");
+            console.log("NOT CHECKED: any receiver the line does not name. Independent installs are");
+            console.log("  unconfirmed by construction — see platform-docs/43 section 2.3.");
           '
         env:
-          RELEASE_BODY: ${{ github.event.release.body }}
+          GH_TOKEN: ${{ github.token }}
 
       - name: Gate — 바이너리가 말하는 판 == package.json == 태그
         run: |

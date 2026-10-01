@@ -35,7 +35,8 @@ describe("the wire surface this release declares", () => {
     // The release workflow reads `releaseAfterReceiverConfirmed` off this table and refuses a
     // release in those classes unless the notes name the receiver that was confirmed first. If this
     // table said otherwise, a `receiver-first` release would ship before the RP widened and the
-    // field would be dropped with no 422 and no log — briefick#48 / #25.
+    // field would be dropped — briefick#48 / #25. (briefick now LOGS a rejected cliVersion, per
+    // their agent-cli-version.ts; there is still no 422, so the agent is never told.)
     const gated = AGENT_COMPAT_CLASSES.filter((c) => AGENT_COMPAT[c].releaseAfterReceiverConfirmed);
     expect(gated, "a class that reorders a deploy is not gated").toEqual(["receiver-first", "breaking"]);
 
