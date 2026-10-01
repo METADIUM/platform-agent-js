@@ -35,18 +35,10 @@ export const MIN_CHECK_INTERVAL_MS = 15 * 1000; // 15s
 export const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000; // 6h
 
 /**
- * The ceiling {@link CHECK_INTERVAL_MS} must stay inside, in requests per hour per RP.
- *
- * ⚠️ 60 is **[Briefick]'s judgement, not a benchmark**: they measured their load (0.24) and total
- * traffic (872 requests over ~6h to 05:47Z, 2026-10-01) but **not the cost per request** — their
- * logs carry no response time. Their estimate is "fine to ~100 agents".
- *
- * ⇒ Halving the interval doubles the rate and fails the test, which is when to ask them again.
- */
-/**
- * The rate ONE agent may generate against ONE RP. ⚠️ Not the RP's total: briefick's headroom
- * judgement was about ~100 agents x 60/h, and **nothing counts agents** on either side, so this
- * enforces the half that has an instrument. See `platform-docs/44-agent-delegation-refresh.md` §3.
+ * The rate ONE agent may generate against ONE RP. ⚠️ **Not the RP's total** — briefick's headroom
+ * judgement was about ~100 agents x 60/h, and the agent count is **a query nobody has run**, not a
+ * missing instrument: every paired agent has an `AgentToken` row there.
+ * See `platform-docs/44-agent-delegation-refresh.md` §3 for both halves.
  */
 export const MAX_CALLS_PER_HOUR_PER_AGENT = 60;
 
