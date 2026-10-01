@@ -56,7 +56,7 @@
  * for this and held the promise while it was deferred):
  *
  * ```
- * measured (briefick, 2026-10-01)   load 0.24 · /api 872 requests that day (≈145/h, all traffic)
+ * measured (briefick, 2026-10-01)   load 0.24 · /api 872 requests **by 05:47Z** (≈6h ⇒ ≈145/h)
  *                                   retrieve observed on the 5-minute cadence in production
  * NOT measured                      cost per request — their nginx logs carry no response time
  * judgement, NOT a measurement      fine up to ~100 agents (≈1.7 req/s; PoP verify plus 2–4
@@ -66,6 +66,12 @@
  * ⚠️ So the headroom is an estimate by the party that carries the load, not a benchmark. If the
  * agent count approaches that figure, or the interval is cut again, **the per-request cost is the
  * thing to measure first** — it is the term nobody has.
+ *
+ * 🔴 The window above was first written as *"872 that day"*, which is how a borrowed number loses
+ * its denominator: the count and the rate then disagree (872/24h is ≈36/h, not 145), and the
+ * comparison this paragraph rests on **flips sign** — 60/h is below 145 and above 36. Caught by
+ * `[Briefick]`, whose measurement it was. ⇒ A rate copied without its interval is not a smaller
+ * version of the measurement; it is a different one.
  *
  * 📌 Long-polling would give seconds instead of a minute, and was not taken: it needs changes on
  * both sides, holds a connection open per agent, and makes proxy read timeouts a shared concern.
