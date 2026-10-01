@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { BriefickAgentClient } from "../src/briefick.js";
-import { WIRE_SURFACE, AGENT_COMPAT_CLASSES } from "../src/wire-surface.js";
+import { WIRE_SURFACE, AGENT_COMPAT, AGENT_COMPAT_CLASSES } from "../src/wire-surface.js";
 import { AgentKey } from "../src/key.js";
 
 /** Captures every request body the client sends, keyed by path. */
@@ -29,6 +29,22 @@ describe("the wire surface this release declares", () => {
     const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8"));
     expect(pkg.agentCompat, "package.json has no agentCompat — which class is this release?").toBeDefined();
     expect(AGENT_COMPAT_CLASSES, `agentCompat "${pkg.agentCompat}" is not a declared class`).toContain(pkg.agentCompat);
+  });
+
+  it("🔴 the two classes that can silently drop a field are the ones the gate holds back", () => {
+    // The release workflow reads `releaseAfterReceiverConfirmed` off this table and refuses a
+    // release in those classes unless the notes name the receiver that was confirmed first. If this
+    // table said otherwise, a `receiver-first` release would ship before the RP widened and the
+    // field would be dropped with no 422 and no log — briefick#48 / #25.
+    const gated = AGENT_COMPAT_CLASSES.filter((c) => AGENT_COMPAT[c].releaseAfterReceiverConfirmed);
+    expect(gated, "a class that reorders a deploy is not gated").toEqual(["receiver-first", "breaking"]);
+
+    const coexist = AGENT_COMPAT_CLASSES.filter((c) => AGENT_COMPAT[c].coexists);
+    expect(coexist, "breaking is the only class an older agent cannot survive").toEqual([
+      "local",
+      "additive",
+      "receiver-first",
+    ]);
   });
 
   it("🔴 what the client actually sends matches WIRE_SURFACE", async () => {
