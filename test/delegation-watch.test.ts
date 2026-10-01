@@ -76,3 +76,49 @@ describe("the daemon's watch for a newer delegation", () => {
     expect(r, "raced connectTarget for the same delivered credential").not.toHaveBeenCalled();
   });
 });
+
+describe("how the watch treats answers that are not a replacement", () => {
+  let target: { auth: { bearer(): string } | null };
+  let store: { save: ReturnType<typeof vi.fn> };
+  let data: { credentials?: Record<string, string> };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    target = { auth: { bearer: () => "b" } };
+    store = { save: vi.fn() };
+    data = { credentials: { "https://rp.example": "OLD" } };
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const run = (retrieveDelegation: ReturnType<typeof vi.fn>) => {
+    void watchForNewerDelegation(
+      target as never, { retrieveDelegation } as never, data as never,
+      { url: "https://rp.example", alias: "rp" } as never, store as never, {} as never,
+    );
+    return retrieveDelegation;
+  };
+
+  it("🔴 does NOT back off while the user is still approving (pending)", async () => {
+    // `[Briefick]`, review of #29: the docstring claimed this and nothing tested it — inverting
+    // `failures = 0` to `failures++` left the file green. Backing off here would slow the loop
+    // down at exactly the moment the user is waiting for their approval to take effect.
+    const r = run(vi.fn().mockResolvedValue({ status: "pending" }));
+    for (let i = 1; i <= 3; i++) {
+      await vi.advanceTimersByTimeAsync(CHECK_INTERVAL_MS);
+      for (let k = 0; k < 5; k++) await Promise.resolve();
+      expect(r, `after ${i} pending answers the interval had already grown`).toHaveBeenCalledTimes(i);
+    }
+  });
+
+  it("🔴 DOES back off on no_agent — a revoked registration never recovers by asking again", async () => {
+    // 200, but not healthy. Treated as healthy it polls every 5 minutes forever and logs on the
+    // RP every time (`[Briefick]`, review of #29 — the weak form of a 401 storm).
+    const r = run(vi.fn().mockResolvedValue({ status: "no_agent" }));
+    await vi.advanceTimersByTimeAsync(CHECK_INTERVAL_MS);
+    for (let k = 0; k < 5; k++) await Promise.resolve();
+    expect(r).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(CHECK_INTERVAL_MS);
+    for (let k = 0; k < 5; k++) await Promise.resolve();
+    expect(r, "asked again at the healthy interval — no_agent did not back off").toHaveBeenCalledTimes(1);
+  });
+});

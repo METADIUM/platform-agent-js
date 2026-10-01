@@ -331,6 +331,18 @@ export async function watchForNewerDelegation(
     if (!target.auth) continue;
     try {
       const r = await client.retrieveDelegation();
+      // 🔴 `no_agent` answers 200, but it is not a healthy answer: the registration was revoked and
+      //    asking again changes nothing. Treated as healthy it polls every 5 minutes forever and
+      //    logs on the RP every time — the weak form of the 401 storm this loop was given a ceiling
+      //    to avoid (`[Briefick]`, review of #29).
+      if (r.status === "no_agent") {
+        failures++;
+        console.error(
+          `[${rp.alias}] 등록이 회수된 에이전트입니다 — 재등록 필요(register --code). ` +
+            `확인 간격을 ${Math.round(nextCheckDelayMs(failures) / 60000)}분으로 늘립니다`,
+        );
+        continue;
+      }
       // An answered question is a healthy check — «pending» is an answer, not a failure. Counting
       // it as one would back off exactly while the user is approving.
       failures = 0;
