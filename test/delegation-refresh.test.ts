@@ -111,3 +111,19 @@ describe("when the daemon asks whether a newer delegation is waiting", () => {
     }
   });
 });
+
+describe("the floor keeps headroom under the interval", () => {
+  it("🔴 the floor is strictly below the interval, so lowering the interval is not silently clamped", () => {
+    // When the interval dropped 5m → 1m the floor was also 1m. Equal values mean the next person to
+    // lower the interval gets clamped back up and **cannot tell their change did nothing** — the
+    // floor exists to stop a hot loop, not to override a deliberate edit without saying so.
+    expect(MIN_CHECK_INTERVAL_MS, "floor is not below the interval — a lower interval would be silently clamped")
+      .toBeLessThan(CHECK_INTERVAL_MS);
+  });
+
+  it("the healthy interval still lands inside briefick's 10-minute badge window", () => {
+    // If a healthy agent could not collect before that badge fires, the badge would tell users to
+    // discard a delegation the daemon was about to pick up (`[Briefick]`, review of #29).
+    expect(CHECK_INTERVAL_MS).toBeLessThan(10 * 60 * 1000);
+  });
+});
