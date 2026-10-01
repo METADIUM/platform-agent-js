@@ -96,30 +96,52 @@ const missing = tags.filter((v) => !published.has(v));
  * version number, two different trees, depending on where you got it.
  */
 const wrongCommit = [];
+const noGitHead = [];
 for (const v of tags) {
   if (!published.has(v)) continue;
   const head = run("npm", ["view", `${PKG}@${v}`, "gitHead"]).trim();
-  if (!head) continue;  // older publishes predate npm recording it — absence is not a mismatch
+  if (!head) {
+    // 🔴 Absence is not innocence above the floor. Every version at or past AUDIT_FROM has a
+    //    gitHead today — a future publish without one (`npm publish ./pack.tgz`, or packing outside
+    //    a checkout) would otherwise skip this check in silence, which is the shape it exists to
+    //    stop (`[Briefick]`, review of #27 — read, not run).
+    noGitHead.push(v);
+    continue;
+  }
   const tagCommit = run("git", ["rev-parse", `v${v}^{commit}`]).trim();
   if (head !== tagCommit) wrongCommit.push(`${v}: npm ${head.slice(0, 9)} ≠ tag ${tagCommit.slice(0, 9)}`);
 }
 
 console.log(`tags from ${AUDIT_FROM}: ${tags.length}  on npm: ${tags.length - missing.length}`);
 
+const problems = [];
 if (missing.length > 0) {
-  console.error(
-    `\nreleased but NOT on npm: ${missing.join(", ")}\n` +
+  problems.push(
+    `released but NOT on npm: ${missing.join(", ")}\n` +
       `  A GitHub Release is only half of a release here — \`npm publish\` is manual.\n` +
       `  \`npx ${PKG}@${missing[0]}\` fails for everyone, and a consumer pinning this version breaks.\n` +
       `  Fix by publishing it, not by raising AUDIT_FROM.`
   );
-  process.exit(1);
 }
 if (wrongCommit.length > 0) {
-  console.error(
-    `\npublished from a different commit than the tag:\n  ${wrongCommit.join("\n  ")}\n` +
+  problems.push(
+    `published from a different commit than the tag:\n  ${wrongCommit.join("\n  ")}\n` +
       `  npm publish is manual here, so this is what a publish from the wrong checkout looks like.`
   );
+}
+if (noGitHead.length > 0) {
+  problems.push(
+    `published without a gitHead: ${noGitHead.join(", ")}\n` +
+      `  Every version at or past ${AUDIT_FROM} records one. Packing outside a checkout, or\n` +
+      `  \`npm publish <tarball>\`, drops it — and then nothing here can tell which tree shipped.`
+  );
+}
+
+// 🔴 Report every class before exiting. Exiting at the first one hid the 0.5.3/0.5.4
+//    mismatches behind the 0.5.5 absence for as long as both were in range (`[Briefick]`, #27):
+//    a run that stops at the first finding makes the second look like it does not exist.
+if (problems.length > 0) {
+  console.error("\n" + problems.join("\n\n"));
   process.exit(1);
 }
 console.log("every release tag is on npm, from the commit its tag points at");
