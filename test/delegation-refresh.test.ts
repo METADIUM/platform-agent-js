@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  delayFor,
   nextCheckDelayMs,
   isReplacement,
   CHECK_INTERVAL_MS,
@@ -22,6 +23,17 @@ describe("when the daemon asks whether a newer delegation is waiting", () => {
     expect(nextCheckDelayMs(1)).toBeGreaterThan(CHECK_INTERVAL_MS);
     expect(Math.max(...delays)).toBe(MAX_BACKOFF_MS);
     expect(nextCheckDelayMs(1000)).toBe(MAX_BACKOFF_MS);
+  });
+
+  it("🔴 the floor is CLAMPED, not just true by luck of the constants", () => {
+    // `[minipaas]`, review of #29: MIN_CHECK_INTERVAL_MS was referenced once — by its own
+    // declaration — while its docstring promised a runtime guarantee. Adding `Math.max` fixed the
+    // sentence but could not be tested through `nextCheckDelayMs`, because with the shipped
+    // constants the clamp never binds: **deleting it left every test green.** These supply bounds
+    // where it does bind, so removing the clamp fails.
+    expect(delayFor(0, 1_000, 60_000, 30_000), "an interval below the floor was not raised").toBe(30_000);
+    expect(delayFor(5, 1_000, 2_000, 30_000), "a ceiling below the floor was not raised").toBe(30_000);
+    expect(delayFor(0, 90_000, 600_000, 30_000), "an interval above the floor was altered").toBe(90_000);
   });
 
   it("🔴 never returns a delay below the floor, at any failure count", () => {

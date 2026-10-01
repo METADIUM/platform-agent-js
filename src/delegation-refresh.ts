@@ -46,10 +46,11 @@
 export const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5m
 
 /**
- * Never check more often than this, whatever else happens.
+ * Never check more often than this — clamped in {@link nextCheckDelayMs}, not merely asserted.
  *
  * ⚠️ Not binding today ({@link CHECK_INTERVAL_MS} is above it). It exists so that a later edit to
  * the interval or the backoff curve cannot produce a hot loop against someone else's service.
+ * ⚠️ A delay computed anywhere other than {@link nextCheckDelayMs} is still outside this floor.
  */
 export const MIN_CHECK_INTERVAL_MS = 60 * 1000; // 1m
 
@@ -62,10 +63,34 @@ export const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000; // 6h
  * `consecutiveFailures` counts *transport or server* failures, not "no newer delegation" —
  * a healthy `pending` answer is a success, because the question was asked and answered.
  */
+/**
+ * The schedule, with its bounds passed in.
+ *
+ * 🔴 Separated so the **clamp can be tested**. `[minipaas]` found that
+ * {@link MIN_CHECK_INTERVAL_MS} was referenced exactly once — by its own declaration — while its
+ * docstring promised "whatever else happens", which reads as a runtime guarantee it did not give.
+ * Adding `Math.max` fixed the sentence and created a second problem: with today's constants the
+ * clamp never binds, so **deleting it left every test green**. A guard nothing can reach is the
+ * thing this repo keeps removing.
+ *
+ * ⇒ With `floor` as an argument a test can supply constants where the clamp *does* bind, so the
+ * floor is enforced in code **and** that enforcement fails when removed.
+ */
+export function delayFor(
+  consecutiveFailures: number,
+  interval: number,
+  ceiling: number,
+  floor: number,
+): number {
+  const base =
+    consecutiveFailures <= 0
+      ? interval
+      : Math.min(interval * 2 ** Math.min(consecutiveFailures, 10), ceiling);
+  return Math.max(floor, base);
+}
+
 export function nextCheckDelayMs(consecutiveFailures: number): number {
-  if (consecutiveFailures <= 0) return CHECK_INTERVAL_MS;
-  const backed = CHECK_INTERVAL_MS * 2 ** Math.min(consecutiveFailures, 10);
-  return Math.min(backed, MAX_BACKOFF_MS);
+  return delayFor(consecutiveFailures, CHECK_INTERVAL_MS, MAX_BACKOFF_MS, MIN_CHECK_INTERVAL_MS);
 }
 
 /**
