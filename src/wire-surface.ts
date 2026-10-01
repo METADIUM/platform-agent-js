@@ -38,6 +38,13 @@
  *
  * ⬜ What it does NOT catch: a change in a field's **meaning** with its name unchanged, and
  * anything about the RP's side. Both are `breaking` by definition and neither is visible from here.
+ *
+ * ⚠️ **And this describes ONE protocol shape, not "the wire".** These are the requests as
+ * briefick receives them — verified 2026-10-01 by reading their four route handlers, whose fields
+ * match this list exactly, including `sessionComplete`, which the test cannot drive. mini-paas
+ * speaks a different shape for the same step (`GET /delegation/retrieve?nonce=&secret=` against
+ * this CLI's `POST {didJwk, pop}`), so nothing here describes that interaction at all. A second RP
+ * shape would need its own entry rather than being folded into these.
  */
 export type AgentCompat = "local" | "additive" | "receiver-first" | "breaking";
 
