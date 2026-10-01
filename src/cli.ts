@@ -11,6 +11,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MINISIGN_PUBLIC_KEYS } from "./release-key.js";
+import { isReplacement, nextCheckDelayMs } from "./delegation-refresh.js";
 import { downloadVerified, freeBytes, latestTag, planUpgrade, type UpgradeIo } from "./upgrade.js";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -300,6 +301,102 @@ function formatLeft(ms: number): string {
  * 없거나 무효화됐으면 지갑 승인(회수)을 기다렸다가 자동 연결한다. 실패해도 데몬은 계속
  * 뜬 채 해당 경로만 503(delegation_pending) — 다른 RP에 영향 없음.
  */
+/**
+ * Asks the RP, on a long interval, whether a **newer** delegation is waiting — and switches to it.
+ *
+ * 🔴 Without this the daemon retrieved a delegation only when it had none
+ * ({@link connectTarget}: `if (!credential)`). A delegation the user approved *afterwards* was
+ * never collected: it sat in `delivered` until the RP's 12-hour window dropped it, while the agent
+ * kept working on the older grant. **The limit the user chose was silently not applied**, and the
+ * only escape was `credentials clear`, which nobody has a reason to know about.
+ * Measured in production (`[Briefick]`, 2026-10-01, 0.5.7/pmvm-02): two 30-day delegations
+ * approved at 03:06 and 03:14 both reached `delivered`, and `retrieve` was called **0 times**
+ * while `session/start` and `complete` kept returning 200 on the cached grant.
+ *
+ * ⚠️ **This runs for every configured RP, not only the one that reported the bug.** The interval
+ * is picked to fit briefick's 10-minute badge because that is the tightest constraint known — not
+ * because it is a briefick setting. And {@link isReplacement} keys on the credential rather than a
+ * status word, because mini-paas spells the same success `retrieved` where briefick spells it
+ * `delivered`; requiring one word made this silently never collect on the other RP.
+ *
+ * ⬜ How far this reaches mini-paas, corrected twice — the halves fail for different reasons:
+ *
+ * ```
+ * session half    NOT mini-paas's job, **by design**. Their mcp/README: the agent exchanges a
+ *                 session with the VERIFIER (sso.cplabs.io) and their MCP server only consumes
+ *                 the resulting token. So `session/start` being absent is architecture, not an
+ *                 unimplemented feature (`[minipaas]`, review of #29).
+ * retrieve half   present, but a different SHAPE: `GET ?nonce=&secret=` against this CLI's
+ *                 `POST {didJwk, pop}`. Status words were only one of two mismatches.
+ * ```
+ *
+ * ⚠️ So this loop does not drive mini-paas today — but **not for the reason first written here**.
+ * The first version said "no session endpoints, therefore unreachable", which was a sound grep
+ * with an unsound inference on top: what would have existed instead, had the design differed, was
+ * the `mcp/` package nobody had looked at. ⇒ A zero can be correct and still carry a wrong
+ * conclusion, and the check is *"what would be there instead?"*
+ *
+ * 🟢 The credential-keyed {@link isReplacement} still matters here: it removes the mismatch that
+ * would have been **silent**. The remaining one (method and auth params) fails loudly, counts as a
+ * failure, and backs off to the ceiling — the safe direction.
+ *
+ * ⚠️ Only runs while connected. If `auth` is null, {@link connectTarget} is already sitting in
+ * `waitCredential` polling the same endpoint — two callers would race for one `delivered`
+ * credential, and whichever lost would see it consumed with nothing to show for it.
+ */
+export async function watchForNewerDelegation(
+  target: DaemonTarget,
+  client: BriefickAgentClient,
+  data: KeyStore,
+  rp: DaemonRp,
+  store: AgentStore,
+  key: AgentKey,
+): Promise<void> {
+  let failures = 0;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, nextCheckDelayMs(failures)));
+    if (!target.auth) continue;
+    try {
+      const r = await client.retrieveDelegation();
+      // 🔴 `no_agent` answers 200, but it is not a healthy answer: the registration was revoked and
+      //    asking again changes nothing. Treated as healthy it polls every 5 minutes forever and
+      //    logs on the RP every time — the weak form of the 401 storm this loop was given a ceiling
+      //    to avoid (`[Briefick]`, review of #29).
+      if (r.status === "no_agent") {
+        failures++;
+        console.error(
+          `[${rp.alias}] 등록이 회수된 에이전트입니다 — 재등록 필요(register --code). ` +
+            `확인 간격을 ${Math.round(nextCheckDelayMs(failures) / 60000)}분으로 늘립니다`,
+        );
+        continue;
+      }
+      // An answered question is a healthy check — «pending» is an answer, not a failure. Counting
+      // it as one would back off exactly while the user is approving.
+      failures = 0;
+      if (!isReplacement(r)) continue;
+      // 🔴 Persist BEFORE touching the session. The RP has already moved this delegation to
+      //    `retrieved` and deleted its copy, so from here this process holds the only one —
+      //    dying between here and the save loses the user's approval, silently.
+      data.credentials = { ...(data.credentials ?? {}), [rp.url]: r.credential! };
+      store.save(data);
+      console.error(`[${rp.alias}] 새 위임 수령 — 세션을 다시 엽니다`);
+      // `DaemonTarget.auth` is a `BearerSource`, which only promises `bearer()`. Narrow rather than
+      // cast: a future source that is not an AgentAuth must not be stopped by a wrong assumption.
+      const previous = target.auth;
+      target.auth = null;
+      if (previous instanceof AgentAuth) previous.stop();
+      target.pendingReason = "새 위임으로 재연결 중";
+      await connectTarget(target, client, data, rp, store, key);
+    } catch (e) {
+      failures++;
+      console.error(
+        `[${rp.alias}] 새 위임 확인 실패(${failures}회, ${Math.round(nextCheckDelayMs(failures) / 60000)}분 후 재시도): ` +
+          (e instanceof Error ? e.message : String(e)),
+      );
+    }
+  }
+}
+
 async function connectTarget(
   target: DaemonTarget,
   client: BriefickAgentClient,
@@ -795,6 +892,7 @@ export async function main(argv: string[]): Promise<number> {
       };
       targets.push(target);
       void connectTarget(target, client, data, rp, store, key);
+      void watchForNewerDelegation(target, client, data, rp, store, key);
     }
 
     // 🔴 **`up` 도 `--port` 를 읽는다**(briefick 리뷰). 종전엔 `cfg.port` 만 봐서
