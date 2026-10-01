@@ -32,8 +32,27 @@ describe("when the daemon asks whether a newer delegation is waiting", () => {
     }
   });
 
-  it("replaces only on delivered WITH a credential", () => {
-    expect(isReplacement({ status: "delivered", credential: "vc" })).toBe(true);
+  it("replaces on a credential, whichever word the RP uses for success", () => {
+    // 🔴 briefick says "delivered"; mini-paas says "retrieved" for the same event
+    // (`backend/routers/agent.py` pickup). Requiring one word made this silently never collect on
+    // the other RP — the bug this loop exists to fix, re-created elsewhere.
+    expect(isReplacement({ status: "delivered", credential: "vc" }), "briefick's success").toBe(true);
+    expect(isReplacement({ status: "retrieved", credential: "vc" }), "mini-paas's success").toBe(true);
+    expect(isReplacement({ status: "anything-new", credential: "vc" }), "an RP word we have not seen").toBe(true);
+    // ⚠️ This case USED to be in the must-not-replace list, under the status-keyed design. It moved
+    //    deliberately: an RP that hands back a credential without a status word has still handed
+    //    back a credential, and refusing it was the same mistake as requiring "delivered".
+    expect(isReplacement({ credential: "vc" }), "a credential with no status word").toBe(true);
+  });
+
+  it("🔴 briefick's ALREADY-COLLECTED answer uses the same word and must NOT replace", () => {
+    // This is why keying on the payload is safe: the two spellings of "retrieved" are separated by
+    // the credential being null, which is what they actually disagree about.
+    expect(isReplacement({ status: "retrieved", credential: null })).toBe(false);
+  });
+
+  it("🔴 refuses a credential the RP has called expired", () => {
+    expect(isReplacement({ status: "expired", credential: "vc" })).toBe(false);
   });
 
   it("🔴 keeps the working delegation for every other answer", () => {
@@ -45,8 +64,8 @@ describe("when the daemon asks whether a newer delegation is waiting", () => {
       { status: "expired" },
       { status: "no_agent" },
       { status: "delivered" },                 // delivered but no credential
+      { status: "retrieved", credential: null },// collected already (briefick)
       { status: "delivered", credential: "" }, // delivered, empty credential
-      { credential: "vc" },                    // credential but no status
       {},
       null,
       undefined,

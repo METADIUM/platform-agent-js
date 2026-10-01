@@ -71,10 +71,30 @@ export function nextCheckDelayMs(consecutiveFailures: number): number {
 /**
  * Whether a retrieval result carries a delegation the daemon should switch to.
  *
- * 🔴 Only `delivered` with a credential counts. `pending`, `no_request`, `expired` and
- * `no_agent` all mean *keep what you have* — treating any of them as "replace" would drop a
- * working delegation for nothing, which is worse than the bug this fixes.
+ * 🔴 **Keyed on the credential, not on the status word — because the word is per-RP.**
+ * This first required `status === "delivered"`, which is briefick's vocabulary. Measured against
+ * the only other RP implementation in reach, mini-paas (`backend/routers/agent.py`), whose pickup
+ * returns `{"status": "retrieved", "credential": …}` for the **same** success:
+ *
+ * ```
+ *                            briefick                      mini-paas
+ * success                    "delivered" + credential      "retrieved" + credential
+ * already collected          "retrieved" + null            "retrieved" + null
+ * ```
+ *
+ * ⇒ Requiring `"delivered"` would have made this loop **silently never collect** on an RP using
+ * the other word — the exact bug it was written to fix, re-created for a different RP and with no
+ * symptom on this side. A delegation is the credential; the word around it is not a contract we
+ * control. (Raised by the user: this change is for every RP, not only the one that reported it.)
+ *
+ * 🟢 And keying on the credential stays correct for briefick's *already collected* case, because
+ * that carries `credential: null` — so the two spellings of "retrieved" are separated by the
+ * payload rather than by the word, which is what they actually disagree about.
+ *
+ * ⚠️ `expired` is still refused even if a credential appears: installing a delegation the RP has
+ * just called expired would be acting against what it told us, and no RP in reach does that.
  */
-export function isReplacement(r: { status?: string; credential?: string } | null | undefined): boolean {
-  return !!r && r.status === "delivered" && typeof r.credential === "string" && r.credential.length > 0;
+export function isReplacement(r: { status?: string; credential?: string | null } | null | undefined): boolean {
+  if (!r || typeof r.credential !== "string" || r.credential.length === 0) return false;
+  return r.status !== "expired";
 }
