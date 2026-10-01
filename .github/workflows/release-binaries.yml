@@ -58,10 +58,23 @@ jobs:
             // 🔵 Fetched INSIDE this branch, so `local` and `additive` releases never depend on
             //    `gh` at all — the lookup used to run before the class was known, which made that
             //    claim in #34's description false ([Briefick] again, review of 8a3cfc8).
+            // ⚠️ Wrapped: every other failure in this gate hands the operator a diagnosis and a
+            //    next action, and the ONE path that did not was the gate failing to read its own
+            //    input — which is exactly the "could not measure" vs "failed" distinction this
+            //    estate keeps trying to hold ([minipaas], review of de4badb). Still fail-closed.
             const { execFileSync } = await import("node:child_process");
-            const body = execFileSync("gh",
-              ["release", "view", process.env.RELEASE_TAG, "--json", "body", "-q", ".body"],
-              { encoding: "utf8" });
+            let body;
+            try {
+              body = execFileSync("gh",
+                ["release", "view", process.env.RELEASE_TAG, "--json", "body", "-q", ".body"],
+                { encoding: "utf8" });
+            } catch (e) {
+              console.error(`Could not READ the release notes for ${process.env.RELEASE_TAG}.`);
+              console.error("  This is not a compatibility failure — the gate never saw its input.");
+              console.error(`  gh exited ${e.status ?? "?"}: ${String(e.stderr ?? e.message).trim()}`);
+              console.error("  Check GH_TOKEN and that the release is published, then re-publish.");
+              process.exit(1);
+            }
             // Requires a receiver, a commit sha and a date, so `receiver-confirmed: TODO` does not
             // pass; the optional bullet accepts the markdown form ([Briefick], review of #34).
             const CONFIRMED = /^\s*(?:[-*]\s+)?receiver-confirmed:\s*\S+\s+[0-9a-f]{7,40}\s+on\s+\d{4}-\d{2}-\d{2}/mi;

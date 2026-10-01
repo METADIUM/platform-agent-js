@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
+  MAX_CALLS_PER_HOUR_PER_AGENT,
+  callsPerHourPerAgent,
   delayFor,
   nextCheckDelayMs,
   isReplacement,
@@ -125,5 +127,22 @@ describe("the floor keeps headroom under the interval", () => {
     // If a healthy agent could not collect before that badge fires, the badge would tell users to
     // discard a delegation the daemon was about to pick up (`[Briefick]`, review of #29).
     expect(CHECK_INTERVAL_MS).toBeLessThan(10 * 60 * 1000);
+  });
+});
+
+describe("the request budget is enforced, not described", () => {
+  it("🔴 the healthy interval stays inside the agreed per-RP ceiling", () => {
+    // The basis for this number used to be a paragraph, and it took two corrections in one day:
+    // a figure attributed to the wrong quantity, then a rate copied without its interval — which
+    // made the comparison it supported flip sign. Halving the interval doubles the rate and fails
+    // here, which is the moment to ask the party carrying the load rather than edit a sentence.
+    expect(callsPerHourPerAgent(), `interval costs more than the agreed ${MAX_CALLS_PER_HOUR_PER_AGENT}/hour per agent, per RP`)
+      .toBeLessThanOrEqual(MAX_CALLS_PER_HOUR_PER_AGENT);
+  });
+
+  it("the cost function is the arithmetic it claims to be", () => {
+    expect(callsPerHourPerAgent(60_000)).toBe(60);
+    expect(callsPerHourPerAgent(30_000)).toBe(120);
+    expect(callsPerHourPerAgent(5 * 60_000)).toBe(12);
   });
 });
