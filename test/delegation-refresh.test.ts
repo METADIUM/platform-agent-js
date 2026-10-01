@@ -51,6 +51,15 @@ describe("when the daemon asks whether a newer delegation is waiting", () => {
     expect(isReplacement({ status: "retrieved", credential: null })).toBe(false);
   });
 
+  it("🔴 a nested lastRequest.status of 'delivered' is not a delivery", () => {
+    // `[Briefick]` flagged this when answering whether any other word carries a credential:
+    // briefick's `pending`/`expired` answers embed `lastRequest.status`, which CAN read
+    // "delivered" — nested, with no credential. Keying on the top-level credential is what makes
+    // that safe, so the near-miss is pinned rather than left as a reasoning step.
+    expect(isReplacement({ status: "pending", lastRequest: { status: "delivered" } } as never)).toBe(false);
+    expect(isReplacement({ status: "expired", lastRequest: { status: "delivered" } } as never)).toBe(false);
+  });
+
   it("🔴 refuses a credential the RP has called expired", () => {
     expect(isReplacement({ status: "expired", credential: "vc" })).toBe(false);
   });
