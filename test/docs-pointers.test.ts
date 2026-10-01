@@ -25,6 +25,14 @@ const REQUIRED_POINTERS: Record<string, string> = {
 const REF_RE = /platform-docs\/(\d{2})(?:-\S*?\.md)?/g;
 
 /**
+ * A PR or issue reference — `platform-docs#5` — is a different thing from a document pointer and is
+ * resolvable on its own, so it is allowed. ⚠️ Without this it was refused as a bare mention, which
+ * would have made citing the PR that introduced a document impossible (`[Briefick]`, review of
+ * c411775).
+ */
+const ISSUE_RE = /platform-docs#\d+/g;
+
+/**
  * Everything that may cite platform-docs. ⚠️ This file is excluded deliberately: it names the repo
  * in prose throughout, and including it would make the check report its own text.
  */
@@ -53,7 +61,7 @@ function numbersIn(relPath: string): string[] {
  */
 function unresolvableIn(relPath: string): string[] {
   const text = readFileSync(join(ROOT, relPath), "utf8");
-  const residue = text.replace(REF_RE, "");
+  const residue = text.replace(REF_RE, "").replace(ISSUE_RE, "");
   return residue.split("\n").filter((line) => line.includes("platform-docs"));
 }
 
@@ -62,8 +70,9 @@ describe("pointers into platform-docs", () => {
     for (const f of SCANNED) {
       expect(
         unresolvableIn(f),
-        `${f} names platform-docs with no document number — a reference nothing can follow ` +
-          "is the defect this suite exists for",
+        `${f} names platform-docs with no document number. Accepted forms: ` +
+          "`platform-docs/NN`, `platform-docs/NN-full-name.md`, or `platform-docs#N` for a PR. " +
+          "A reference nothing can follow is the defect this suite exists for",
       ).toEqual([]);
     }
   });
