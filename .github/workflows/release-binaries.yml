@@ -61,6 +61,11 @@ jobs:
               process.exit(1);
             }
             console.log("receiver confirmation present in the release notes.");
+            // What this gate did NOT check: that the class is the right one. `agentCompat` is a
+            // human judgement — a replacement labelled `receiver-first` passes here with
+            // `coexists: true` recorded against it falsely. Green means the declared class was
+            // handled, not that it was declared correctly.
+            console.log(`NOT CHECKED: that ${c} is the correct class for this change. Nothing can.`);
           '
         env:
           RELEASE_BODY: ${{ github.event.release.body }}
