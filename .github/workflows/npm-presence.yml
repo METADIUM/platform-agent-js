@@ -1,0 +1,26 @@
+# 🔴 A release here is automated in halves: `release-binaries.yml` builds, signs and attaches the
+#    SEA binaries; `npm publish` is **manual** and no workflow runs it. So a release can be
+#    complete by every signal this repository produces and still be missing from the registry
+#    `npx` reads. 0.5.5 was released and never published, and nothing noticed for four releases.
+#
+# ⚠️ This cannot run on `release: published` — npm publish happens afterwards, so it would fail on
+#    every release and be turned off. On a schedule it finds a miss within a day, which is ahead of
+#    a consumer pinning the version. That pin is the event that turns our miss into their outage.
+name: npm presence
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  every-tag-is-on-npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags are the input; a shallow clone makes this check read nothing
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: node scripts/check-npm-published.mjs
