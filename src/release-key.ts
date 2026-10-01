@@ -12,6 +12,57 @@
  * release accept both; binaries older than it still cannot, and for those `install.sh` is the only
  * route.
  *
+ * 🔴 **Step 0, before any of that: prove the entry you just added is the key you actually hold.**
+ * Sign a throwaway vector with the new secret key and verify it against `MINISIGN_PUBLIC_KEYS`:
+ *
+ * ```
+ * minisign -G -p new.pub -s new.key          # the rotation keypair
+ * echo probe > vector.txt
+ * minisign -Sm vector.txt -s new.key
+ * # then verify vector.txt against the list, with this repo's own verifyContentAny
+ * ```
+ *
+ * `test/release-key.test.ts` locks `KEYS[0]` byte-for-byte against `minisign.pub`, so entry **0**
+ * is known to have come from a keygen rather than a paste. **Nothing compares entry 1 to
+ * anything** — and step 0 is what supplies that, because a signature made by the new key is the
+ * only evidence that the entry corresponds to a key someone actually has.
+ *
+ * ⇒ **As a procedure** it is wider than the duplicate-id assertion below: that one fires only when
+ * two entries are *identical*, this fires whenever entry 1 is **not our key** (`[minipaas]`, who
+ * also pointed out that the ⬜ below closes *during* a rotation rather than never — the new keypair
+ * does not exist before the rotation, but it does exist at step 0).
+ *
+ * 🔴 **But it stops being wider the moment it becomes a keyId-indexed test**, and then the two
+ * cover different things (`[minipaas]`, review of #28, correcting their own earlier claim — and
+ * mine). Measured: `test/fixtures/SHA256SUMS.v0.5.6.minisig` is signed by keyId `fc9149bf27cbb2aa`,
+ * which is `KEYS[0]`'s own id. So a vector test that looks up a fixture *by key id*:
+ *
+ * ```
+ * [old, old]              vector test  🟢 PASSES — that id already has a fixture
+ *                         duplicate-id 🔴 catches it
+ * [old, wrong-but-valid]  vector test  🔴 catches it — no fixture for that id
+ *                         duplicate-id 🟢 passes — the ids differ
+ * ```
+ *
+ * ⇒ **Neither subsumes the other.** The paste mistake produces an id that already has a fixture,
+ * so the stronger-looking check sails past precisely the case it was introduced to replace. Keep
+ * both.
+ *
+ * 🟢 Measured 2026-10-01 with a throwaway keypair, both directions:
+ *
+ * ```
+ * list = [old, new]   signature by the new key   ✅ verifies
+ * list = [old, old]   ← the paste mistake         ❌ refused: "signed by key …; this binary trusts
+ *                                                  fc9149bf27cbb2aa, fc9149bf27cbb2aa"
+ * ```
+ *
+ * ⚠️ What step 0 still does not establish: that the new keypair is the **intended** one — that
+ * it was generated into the right custody, not merely that it exists and signs. That is outside
+ * this file and outside the procedure.
+ *
+ * 📌 If the throwaway vector is committed, this stops being a procedure step and becomes a test
+ * from that day on.
+ *
  * 🔴 **"Let it propagate" is the one step with no completion condition**, and it is the step the
  * whole plan turns on — switching too early strands every install that missed the window, and the
  * failure is silent until the day they upgrade, where it looks like a corrupted download
