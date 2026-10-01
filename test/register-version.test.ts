@@ -59,7 +59,7 @@ import { AgentClient } from "../src/briefick.js";
  * ⬜ There is no device that closes this from here. What is available is saying where the rule
  * lives and what happens when it moves, which is what the paragraph above is for.
  */
-const BRIEFICK_SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]{1,24})?$/;
+const BRIEFICK_SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]{1,24})?(?:\+[0-9A-Za-z.-]{1,24})?$/;
 
 function bodyOf(calls: Array<{ body: unknown }>): Record<string, unknown> {
   return JSON.parse(String((calls[0] as { body: string }).body)) as Record<string, unknown>;
@@ -126,6 +126,26 @@ describe("the version this CLI reports on register", () => {
   it("🔴 a release-tag-shaped version would NOT be stored — the control for the line above", () => {
     expect("v0.5.6").not.toMatch(BRIEFICK_SEMVER);
     expect("0.5").not.toMatch(BRIEFICK_SEMVER);
+  });
+
+  it("🔴 accepts a prerelease AND build metadata together — valid semver the old copy rejected", () => {
+    // The old form was `(?:[-+]…)?` — ONE optional group, so a version carrying both was thrown
+    // away. semver.org's own example is in this shape (`briefick#48`, found by minipaas).
+    // ⚠️ This is briefick WIDENING, announced before the change as agreed. The copy here is
+    // updated to match; had it not been, a release in this shape would have gone red on this side
+    // while briefick stored it happily — a false red, the mirror of the silent drop this file
+    // guards against.
+    //
+    // 🔴 **Merge `briefick#48` first, or together.** Notification is not ordering
+    // (`[metapass-saas]`, review of #25), and the two orders fail differently:
+    //   #48 first   they accept more, this copy still rejects  → FALSE RED here. Loud, safe.
+    //   #25 first   this accepts, they reject                  → CLI sends, briefick SILENTLY
+    //               drops, and this side is green — the exact failure this file exists to stop.
+    // ⬜ Latent today: it needs a `package.json` version carrying a prerelease AND build metadata
+    // between the two merges, and it is `0.5.6`. Written down because the order is free to get
+    // right now and not free later.
+    expect("1.2.3-rc.1+build.5").toMatch(BRIEFICK_SEMVER);
+    expect("1.2.3-0.3.7+build.11.e0f985a").toMatch(BRIEFICK_SEMVER);
   });
 
   it("⚠️ documents a shared quirk: a leading zero is accepted, though semver forbids it", () => {
