@@ -27,21 +27,74 @@ jobs:
       #    넷이 **같은 번들**에서 나오므로 v0.5.1 의 실패 모양(SEA 에 package.json 이 없다)은
       #    하나로도 잡히고, 타깃별로 갈리는 것은 아래 층①이 실행 없이 전수로 덮는다.
       #    📌 linux-x64 에서도 같은 증상이라는 것은 briefick 이 v0.5.1 자산으로 실측했다.
-      # 🔴 A release must say which compatibility class it is. `local`/`additive` coexist with
-      #    older agents; `receiver-first` means the RP must be widened FIRST (sender-first is a
-      #    silent drop — briefick#48/#25); `breaking` means old agents must upgrade.
-      #    Without this the class is decided in prose, once, wherever it came up.
-      - name: Gate — agentCompat 이 선언돼 있는가
+      # A release must say which compatibility class it is, and `receiver-first`/`breaking`
+      # must name the receiver that was confirmed first — shipping before the RP widens is a
+      # silent drop on their side (briefick#48/#25). The classes and their two properties come
+      # from dist/wire-surface.js, so this gate cannot drift from the source.
+      - name: Gate — the release declares its compatibility class
         run: |
           set -euo pipefail
-          c=$(node -p "require('./package.json').agentCompat ?? ''")
-          case "$c" in
-            local|additive|receiver-first|breaking) echo "agentCompat = $c" ;;
-            *) echo "package.json 의 agentCompat 이 없거나 알 수 없는 값입니다: '$c'"
-               echo "  local | additive | receiver-first | breaking 중 하나여야 합니다."
-               echo "  설정하기 전에 src/wire-surface.ts 를 읽으세요 — 어느 부류인지가 배포 순서를 정합니다."
-               exit 1 ;;
-          esac
+          RELEASE_TAG="${{ github.event.release.tag_name }}" node --input-type=module -e '
+            const { AGENT_COMPAT } = await import("./dist/wire-surface.js");
+            const { readFileSync } = await import("node:fs");
+            const c = JSON.parse(readFileSync("./package.json", "utf8")).agentCompat ?? "";
+            const spec = AGENT_COMPAT[c];
+            if (!spec) {
+              console.error(`package.json agentCompat is missing or unknown: ${JSON.stringify(c)}`);
+              console.error(`  expected one of: ${Object.keys(AGENT_COMPAT).join(" | ")}`);
+              console.error("  read platform-docs/43-agent-cli-wire-compatibility.md before setting it —");
+              console.error("  which class this is decides the deploy order.");
+              process.exit(1);
+            }
+            console.log(`agentCompat = ${c} (coexists=${spec.coexists}, releaseAfterReceiverConfirmed=${spec.releaseAfterReceiverConfirmed})`);
+            if (!spec.releaseAfterReceiverConfirmed) process.exit(0);
+            // The receiver cannot be probed from here: briefick deploys on user approval with no
+            // window, and other organisations run their own installs. So the gate requires the
+            // release notes to say which receiver was confirmed, at what version.
+            //
+            // 🔴 Read the body LIVE, not from `github.event.release.body`: a **Re-run** replays the
+            //    ORIGINAL payload, so an author who adds the line and clicks "Re-run jobs" would
+            //    stay red and be blamed for a line they did write ([Briefick], review of #34).
+            // 🔵 Fetched INSIDE this branch, so `local` and `additive` releases never depend on
+            //    `gh` at all — the lookup used to run before the class was known, which made that
+            //    claim in #34's description false ([Briefick] again, review of 8a3cfc8).
+            const { execFileSync } = await import("node:child_process");
+            const body = execFileSync("gh",
+              ["release", "view", process.env.RELEASE_TAG, "--json", "body", "-q", ".body"],
+              { encoding: "utf8" });
+            // Requires a receiver, a commit sha and a date, so `receiver-confirmed: TODO` does not
+            // pass; the optional bullet accepts the markdown form ([Briefick], review of #34).
+            const CONFIRMED = /^\s*(?:[-*]\s+)?receiver-confirmed:\s*\S+\s+[0-9a-f]{7,40}\s+on\s+\d{4}-\d{2}-\d{2}/mi;
+            if (!CONFIRMED.test(body)) {
+              console.error(`agentCompat = ${c} requires the receiver to be confirmed BEFORE this release.`);
+              console.error("  Add a line to the release notes and RE-PUBLISH (a workflow Re-run");
+              console.error("  replays the old payload; this gate re-reads live, but re-publish is safer):");
+              console.error("    receiver-confirmed: briefick 30cf66f on 2026-10-01");
+              console.error("  The commit must CONTAIN the widening, not merely be newer:");
+              console.error("    git merge-base --is-ancestor <widening> <running>   # in the receiver repo");
+              console.error("  If the receiver cannot be queried at all, do not force this: re-cut the");
+              console.error("  change as `additive` (new field beside the old one) — nothing needs ordering.");
+              console.error("  See platform-docs/43-agent-cli-wire-compatibility.md section 2.3.");
+              process.exit(1);
+            }
+            console.log("receiver confirmation present in the release notes.");
+            // What this gate did NOT check: that the class is the right one. `agentCompat` is a
+            // human judgement — a replacement labelled `receiver-first` passes here with
+            // `coexists: true` recorded against it falsely. Green means the declared class was
+            // handled, not that it was declared correctly.
+            console.log(`NOT CHECKED: that ${c} is the correct class for this change. Nothing can.`);
+            console.log("NOT CHECKED: that the named commit CONTAINS the widening — confirm with");
+            console.log("  `git merge-base --is-ancestor <widening> <running>` in the receiver's repo.");
+            console.log("NOT CHECKED: any receiver the line does not name. Independent installs are");
+            console.log("  unconfirmed by construction — see platform-docs/43 section 2.3.");
+            console.log("NOT CHECKED: that a confirmation HAPPENED. This gate measures that a line");
+            console.log("  exists and is well-formed. The sha and date make it re-checkable by a");
+            console.log("  third party against the receiver; they do not make it true.");
+            console.log("NOT CHECKED: that the sha and date RESOLVE. They are matched as shapes and");
+            console.log("  never looked up — `deadbeef` and `2026-13-45` both pass this gate.");
+          '
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Gate — 바이너리가 말하는 판 == package.json == 태그
         run: |
