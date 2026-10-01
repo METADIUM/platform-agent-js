@@ -9,7 +9,8 @@
  * copy in the same update, so a successful check **consumes** it. The caller must persist before
  * doing anything else.
  *
- * 📌 Background and the measurements behind the numbers: `platform-docs`, agent delegation.
+ * 📌 Background and the measurements behind the numbers:
+ * `platform-docs/44-agent-delegation-refresh.md`.
  */
 
 /**
@@ -17,7 +18,7 @@
  *
  * ⚠️ Must stay inside briefick's 10-minute "not collected" badge window, or a healthy agent trips a
  * badge telling the user to discard a delegation it is about to collect. Pinned by a test.
- * ⚠️ Must stay inside {@link MAX_CALLS_PER_HOUR_PER_RP}. Also pinned by a test.
+ * ⚠️ Must stay inside {@link MAX_CALLS_PER_HOUR_PER_AGENT}. Also pinned by a test.
  */
 export const CHECK_INTERVAL_MS = 60 * 1000; // 1m
 
@@ -42,10 +43,15 @@ export const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000; // 6h
  *
  * ⇒ Halving the interval doubles the rate and fails the test, which is when to ask them again.
  */
-export const MAX_CALLS_PER_HOUR_PER_RP = 60;
+/**
+ * The rate ONE agent may generate against ONE RP. ⚠️ Not the RP's total: briefick's headroom
+ * judgement was about ~100 agents x 60/h, and **nothing counts agents** on either side, so this
+ * enforces the half that has an instrument. See `platform-docs/44-agent-delegation-refresh.md` §3.
+ */
+export const MAX_CALLS_PER_HOUR_PER_AGENT = 60;
 
 /** What {@link CHECK_INTERVAL_MS} costs an RP per hour while healthy. */
-export function callsPerHourPerRp(intervalMs: number = CHECK_INTERVAL_MS): number {
+export function callsPerHourPerAgent(intervalMs: number = CHECK_INTERVAL_MS): number {
   return 3_600_000 / intervalMs;
 }
 

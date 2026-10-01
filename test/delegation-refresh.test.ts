@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
-  MAX_CALLS_PER_HOUR_PER_RP,
-  callsPerHourPerRp,
+  MAX_CALLS_PER_HOUR_PER_AGENT,
+  callsPerHourPerAgent,
   delayFor,
   nextCheckDelayMs,
   isReplacement,
@@ -136,13 +136,13 @@ describe("the request budget is enforced, not described", () => {
     // a figure attributed to the wrong quantity, then a rate copied without its interval — which
     // made the comparison it supported flip sign. Halving the interval doubles the rate and fails
     // here, which is the moment to ask the party carrying the load rather than edit a sentence.
-    expect(callsPerHourPerRp(), `interval costs more than the agreed ${MAX_CALLS_PER_HOUR_PER_RP}/hour per RP`)
-      .toBeLessThanOrEqual(MAX_CALLS_PER_HOUR_PER_RP);
+    expect(callsPerHourPerAgent(), `interval costs more than the agreed ${MAX_CALLS_PER_HOUR_PER_AGENT}/hour per agent, per RP`)
+      .toBeLessThanOrEqual(MAX_CALLS_PER_HOUR_PER_AGENT);
   });
 
   it("the cost function is the arithmetic it claims to be", () => {
-    expect(callsPerHourPerRp(60_000)).toBe(60);
-    expect(callsPerHourPerRp(30_000)).toBe(120);
-    expect(callsPerHourPerRp(5 * 60_000)).toBe(12);
+    expect(callsPerHourPerAgent(60_000)).toBe(60);
+    expect(callsPerHourPerAgent(30_000)).toBe(120);
+    expect(callsPerHourPerAgent(5 * 60_000)).toBe(12);
   });
 });

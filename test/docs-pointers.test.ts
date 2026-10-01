@@ -14,6 +14,7 @@ const PLATFORM_DOCS = join(ROOT, "..", "platform-docs");
 const REQUIRED_POINTERS: Record<string, string> = {
   "src/release-key.ts": "42-agent-cli-release-key-rotation.md",
   "src/wire-surface.ts": "43-agent-cli-wire-compatibility.md",
+  "src/delegation-refresh.ts": "44-agent-delegation-refresh.md",
 };
 
 const POINTER_RE = /platform-docs\/([0-9]{2}-[A-Za-z0-9._-]+\.md)/g;
@@ -23,7 +24,33 @@ function pointersIn(relPath: string): string[] {
   return [...text.matchAll(POINTER_RE)].map((m) => m[1]);
 }
 
+/**
+ * 🔴 A pointer that names no file is the hole this suite was built to close and did not. `#33`
+ * carried "`platform-docs`, agent delegation" — prose naming no document, pointing at one that did
+ * not exist — and it matched {@link POINTER_RE} nowhere, so nothing looked at it (`[Briefick]`,
+ * review of a04cce0). A reference that cannot be resolved cannot be checked, so the form itself is
+ * refused.
+ */
+function bareMentionsIn(relPath: string): string[] {
+  const text = readFileSync(join(ROOT, relPath), "utf8");
+  // Remove every well-formed pointer, then anything still naming the repo is a bare mention.
+  const residue = text.replace(POINTER_RE, "");
+  return residue.split("\n").filter((line) => line.includes("platform-docs"));
+}
+
 describe("pointers into platform-docs", () => {
+  it("🔴 no source file mentions platform-docs without naming a document", () => {
+    const sources = readdirSync(join(ROOT, "src")).filter((f) => f.endsWith(".ts"));
+    for (const f of sources) {
+      const bare = bareMentionsIn(join("src", f));
+      expect(
+        bare,
+        `src/${f} names platform-docs without a resolvable NN-….md — ` +
+          "a pointer nothing can follow is the defect this suite exists for",
+      ).toEqual([]);
+    }
+  });
+
   it("every file that moved its reasoning out still says where it went", () => {
     for (const [file, doc] of Object.entries(REQUIRED_POINTERS)) {
       expect(
