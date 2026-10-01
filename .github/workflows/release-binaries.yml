@@ -34,12 +34,7 @@ jobs:
       - name: Gate — the release declares its compatibility class
         run: |
           set -euo pipefail
-          # 🔴 Read the body LIVE, not from `github.event.release.body`. A **Re-run** replays the
-          #    ORIGINAL event payload, so an author who adds the line and clicks "Re-run jobs"
-          #    would stay red and be blamed for a line they did write ([Briefick], review of #34).
-          RELEASE_BODY=$(gh release view "${{ github.event.release.tag_name }}" --json body -q .body)
-          export RELEASE_BODY
-          node --input-type=module -e '
+          RELEASE_TAG="${{ github.event.release.tag_name }}" node --input-type=module -e '
             const { AGENT_COMPAT } = await import("./dist/wire-surface.js");
             const { readFileSync } = await import("node:fs");
             const c = JSON.parse(readFileSync("./package.json", "utf8")).agentCompat ?? "";
@@ -56,7 +51,17 @@ jobs:
             // The receiver cannot be probed from here: briefick deploys on user approval with no
             // window, and other organisations run their own installs. So the gate requires the
             // release notes to say which receiver was confirmed, at what version.
-            const body = process.env.RELEASE_BODY ?? "";
+            //
+            // 🔴 Read the body LIVE, not from `github.event.release.body`: a **Re-run** replays the
+            //    ORIGINAL payload, so an author who adds the line and clicks "Re-run jobs" would
+            //    stay red and be blamed for a line they did write ([Briefick], review of #34).
+            // 🔵 Fetched INSIDE this branch, so `local` and `additive` releases never depend on
+            //    `gh` at all — the lookup used to run before the class was known, which made that
+            //    claim in #34's description false ([Briefick] again, review of 8a3cfc8).
+            const { execFileSync } = await import("node:child_process");
+            const body = execFileSync("gh",
+              ["release", "view", process.env.RELEASE_TAG, "--json", "body", "-q", ".body"],
+              { encoding: "utf8" });
             // Requires a receiver, a commit sha and a date, so `receiver-confirmed: TODO` does not
             // pass; the optional bullet accepts the markdown form ([Briefick], review of #34).
             const CONFIRMED = /^\s*(?:[-*]\s+)?receiver-confirmed:\s*\S+\s+[0-9a-f]{7,40}\s+on\s+\d{4}-\d{2}-\d{2}/mi;
