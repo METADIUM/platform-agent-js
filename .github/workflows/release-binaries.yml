@@ -85,6 +85,8 @@ jobs:
             console.log("NOT CHECKED: that a confirmation HAPPENED. This gate measures that a line");
             console.log("  exists and is well-formed. The sha and date make it re-checkable by a");
             console.log("  third party against the receiver; they do not make it true.");
+            console.log("NOT CHECKED: that the sha and date RESOLVE. They are matched as shapes and");
+            console.log("  never looked up — `deadbeef` and `2026-13-45` both pass this gate.");
           '
         env:
           GH_TOKEN: ${{ github.token }}
