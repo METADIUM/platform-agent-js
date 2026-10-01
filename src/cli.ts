@@ -319,12 +319,26 @@ function formatLeft(ms: number): string {
  * status word, because mini-paas spells the same success `retrieved` where briefick spells it
  * `delivered`; requiring one word made this silently never collect on the other RP.
  *
- * ⬜ Not every RP can run this daemon today. mini-paas implements the register contract explicitly
- * (`backend/models/schemas.py`: *"Compatible with the @metadium-did/platform-agent-js contract"*)
- * but has **no** `session/start`, `session/complete` or `/api/mcp` — 0 occurrences repo-wide,
- * 2026-10-01 — and its retrieve is `GET ?nonce=&secret=` rather than `POST {didJwk, pop}`. So this
- * loop cannot reach it yet; against such an RP the call fails, counts as a failure, and backs off
- * to the ceiling, which is the safe direction.
+ * ⬜ How far this reaches mini-paas, corrected twice — the halves fail for different reasons:
+ *
+ * ```
+ * session half    NOT mini-paas's job, **by design**. Their mcp/README: the agent exchanges a
+ *                 session with the VERIFIER (sso.cplabs.io) and their MCP server only consumes
+ *                 the resulting token. So `session/start` being absent is architecture, not an
+ *                 unimplemented feature (`[minipaas]`, review of #29).
+ * retrieve half   present, but a different SHAPE: `GET ?nonce=&secret=` against this CLI's
+ *                 `POST {didJwk, pop}`. Status words were only one of two mismatches.
+ * ```
+ *
+ * ⚠️ So this loop does not drive mini-paas today — but **not for the reason first written here**.
+ * The first version said "no session endpoints, therefore unreachable", which was a sound grep
+ * with an unsound inference on top: what would have existed instead, had the design differed, was
+ * the `mcp/` package nobody had looked at. ⇒ A zero can be correct and still carry a wrong
+ * conclusion, and the check is *"what would be there instead?"*
+ *
+ * 🟢 The credential-keyed {@link isReplacement} still matters here: it removes the mismatch that
+ * would have been **silent**. The remaining one (method and auth params) fails loudly, counts as a
+ * failure, and backs off to the ceiling — the safe direction.
  *
  * ⚠️ Only runs while connected. If `auth` is null, {@link connectTarget} is already sitting in
  * `waitCredential` polling the same endpoint — two callers would race for one `delivered`
