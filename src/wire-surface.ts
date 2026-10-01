@@ -14,16 +14,32 @@
  * ## The four classes a release can be
  *
  * ```
- * local           behaviour inside the CLI only. Nothing on the wire moves.      coexists
+ * local           no field and no shape changes on any request.                   coexists
  * additive        a NEW field the receiver may ignore.                            coexists
  * receiver-first  an existing field's ACCEPTED SHAPE widens.                      ⚠️ ORDER MATTERS
  *                 widening the sender first = silent drop; the receiver first = a loud false red
  * breaking        a field is removed, renamed, or its meaning changes.            🔴 must upgrade
  * ```
  *
+ * ⚠️ **`local` does not mean "nothing new reaches the RP".** It said so in the first draft and
+ * was already false of the release that introduced it: 0.5.8 adds no field, but it adds a
+ * **recurring call** — `retrieve` every five minutes per RP, which an RP sees as new traffic and,
+ * for `no_agent`, as a log line each time (`[Briefick]`, review of #30). The classes are about
+ * **whether old and new can coexist**, not about load. A release that changes what an RP must
+ * absorb should still say so, and this field is not where that is said.
+ *
  * ⚠️ `receiver-first` is the class a simple minimum-version gate cannot express, and it is the one
  * that actually happened. Coexistence is not a property of the pair — it is a property of **the
  * order you deploy them in**.
+ *
+ * 🔴 **And "the receiver" is not one thing.** `[Briefick]` corrected the prescription: their
+ * deploy has no window (it goes out on user approval, lead time minutes to hours, migrations
+ * separate), and they also assume **independent installs by other organisations** — whose state
+ * neither this CLI nor briefick can see. So *"deploy the RP first"* is not checkable for those.
+ * ⇒ The prescription is **"release after the receiver is confirmed"**, and for briefick the
+ * confirmation is `/api/version` (the running commit) plus `src/lib/agent-cli-version.ts`. For an
+ * RP that cannot be queried, a `receiver-first` change has no safe release order at all — which is
+ * a fact about that deployment, and better said than assumed away.
  *
  * ## What makes the declaration honest
  *
