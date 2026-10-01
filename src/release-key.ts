@@ -27,10 +27,26 @@
  * anything** — and step 0 is what supplies that, because a signature made by the new key is the
  * only evidence that the entry corresponds to a key someone actually has.
  *
- * ⇒ It is strictly wider than the duplicate-id assertion below: that one fires only when two
- * entries are *identical*, this fires whenever entry 1 is **not our key** (`[minipaas]`, who also
- * pointed out that the ⬜ below closes *during* a rotation rather than never — the new keypair
+ * ⇒ **As a procedure** it is wider than the duplicate-id assertion below: that one fires only when
+ * two entries are *identical*, this fires whenever entry 1 is **not our key** (`[minipaas]`, who
+ * also pointed out that the ⬜ below closes *during* a rotation rather than never — the new keypair
  * does not exist before the rotation, but it does exist at step 0).
+ *
+ * 🔴 **But it stops being wider the moment it becomes a keyId-indexed test**, and then the two
+ * cover different things (`[minipaas]`, review of #28, correcting their own earlier claim — and
+ * mine). Measured: `test/fixtures/SHA256SUMS.v0.5.6.minisig` is signed by keyId `fc9149bf27cbb2aa`,
+ * which is `KEYS[0]`'s own id. So a vector test that looks up a fixture *by key id*:
+ *
+ * ```
+ * [old, old]              vector test  🟢 PASSES — that id already has a fixture
+ *                         duplicate-id 🔴 catches it
+ * [old, wrong-but-valid]  vector test  🔴 catches it — no fixture for that id
+ *                         duplicate-id 🟢 passes — the ids differ
+ * ```
+ *
+ * ⇒ **Neither subsumes the other.** The paste mistake produces an id that already has a fixture,
+ * so the stronger-looking check sails past precisely the case it was introduced to replace. Keep
+ * both.
  *
  * 🟢 Measured 2026-10-01 with a throwaway keypair, both directions:
  *
