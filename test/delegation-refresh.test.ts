@@ -14,6 +14,22 @@ describe("when the daemon asks whether a newer delegation is waiting", () => {
     expect(nextCheckDelayMs(-1)).toBe(CHECK_INTERVAL_MS);
   });
 
+  it("\u{1F534} nextCheckDelayMs passes its bounds to delayFor in the right order", () => {
+    // `delayFor` takes four numbers of the same unit, so a wrong order compiles and runs.
+    // `[minipaas]` ran all five permutations against the assertions above and every one failed —
+    // but by accident: the line that caught them was written to check the healthy interval, not
+    // the wiring. **Anyone "simplifying" it would delete the only wiring guard without knowing.**
+    // This says so out loud, so the guard survives being noticed.
+    expect(nextCheckDelayMs(0), "interval is not in the interval slot").toBe(CHECK_INTERVAL_MS);
+    expect(nextCheckDelayMs(1000), "ceiling is not in the ceiling slot").toBe(MAX_BACKOFF_MS);
+    // the floor is below both, so it can only be identified by what it does NOT change
+    expect(nextCheckDelayMs(0), "floor leaked into the interval slot").not.toBe(MIN_CHECK_INTERVAL_MS);
+    // \u{1F534} (MIN, MAX, CHECK) survives all three assertions above — the floor masks the tiny
+    //    interval at every point they sample. Only the FIRST BACKOFF STEP separates them: correct
+    //    wiring doubles the interval, that one stays pinned at the floor. Measured, not reasoned.
+    expect(nextCheckDelayMs(1), "the first backoff step is not twice the interval").toBe(2 * CHECK_INTERVAL_MS);
+  });
+
   it("🔴 backs off on consecutive failures and stops at the ceiling", () => {
     // `[Briefick]` asked for this by name: an earlier agent bug turned a failing auth path into a
     // 401 storm against their RP. Unbounded retries against someone else's service is the failure
