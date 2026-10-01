@@ -66,6 +66,30 @@ function xmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/**
+ * The systemctl calls that make a freshly written unit file the running process.
+ *
+ * 🔴 `restart`, not `enable --now`. `--now` starts a unit that is **stopped** and does nothing
+ * to one that is already running — so replacing the binary and re-running `up --install` left the
+ * OLD process serving, silently. Measured on pmvm-02 (2026-10-01, `[Briefick]`): after installing
+ * 0.5.8 the journal showed only "Reloading", the PID from 03:01 kept running, and sessions went on
+ * reporting `cliVersion 0.5.7` until someone ran `systemctl --user restart` by hand.
+ *
+ * ⚠️ macOS never had this: it does `bootout` then `bootstrap`, an unconditional reload. **The
+ * asymmetry is why testing on a Mac could not see it** — the same command on the two platforms
+ * meant "reload" on one and "start if stopped" on the other.
+ *
+ * 📌 Returned as data so the sequence is testable: what matters is which commands run and in
+ * what order, and `install()` only executes them.
+ */
+export function systemdActivation(): string[][] {
+  return [
+    ["--user", "daemon-reload"],
+    ["--user", "enable", SYSTEMD_UNIT],
+    ["--user", "restart", SYSTEMD_UNIT],
+  ];
+}
+
 export function install(logFile: string): InstallResult {
   const { args, volatile } = execLine();
   const notes: string[] = [];
@@ -119,8 +143,9 @@ WantedBy=default.target
 `;
     mkdirSync(unitDir, { recursive: true });
     writeFileSync(unitPath, unit);
-    run("systemctl", ["--user", "daemon-reload"]);
-    run("systemctl", ["--user", "enable", "--now", SYSTEMD_UNIT]);
+    for (const argv of systemdActivation()) {
+      run("systemctl", argv);
+    }
     // linger — 로그아웃 후에도 유지(서버 필수). polkit 정책으로 거부될 수 있음(doc26 검토 ④).
     try {
       run("loginctl", ["enable-linger", process.env.USER ?? ""]);
