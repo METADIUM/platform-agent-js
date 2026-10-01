@@ -27,6 +27,22 @@ jobs:
       #    넷이 **같은 번들**에서 나오므로 v0.5.1 의 실패 모양(SEA 에 package.json 이 없다)은
       #    하나로도 잡히고, 타깃별로 갈리는 것은 아래 층①이 실행 없이 전수로 덮는다.
       #    📌 linux-x64 에서도 같은 증상이라는 것은 briefick 이 v0.5.1 자산으로 실측했다.
+      # 🔴 A release must say which compatibility class it is. `local`/`additive` coexist with
+      #    older agents; `receiver-first` means the RP must be widened FIRST (sender-first is a
+      #    silent drop — briefick#48/#25); `breaking` means old agents must upgrade.
+      #    Without this the class is decided in prose, once, wherever it came up.
+      - name: Gate — agentCompat 이 선언돼 있는가
+        run: |
+          set -euo pipefail
+          c=$(node -p "require('./package.json').agentCompat ?? ''")
+          case "$c" in
+            local|additive|receiver-first|breaking) echo "agentCompat = $c" ;;
+            *) echo "package.json 의 agentCompat 이 없거나 알 수 없는 값입니다: '$c'"
+               echo "  local | additive | receiver-first | breaking 중 하나여야 합니다."
+               echo "  설정하기 전에 src/wire-surface.ts 를 읽으세요 — 어느 부류인지가 배포 순서를 정합니다."
+               exit 1 ;;
+          esac
+
       - name: Gate — 바이너리가 말하는 판 == package.json == 태그
         run: |
           set -euo pipefail
