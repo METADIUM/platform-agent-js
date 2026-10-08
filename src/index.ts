@@ -5,6 +5,7 @@
  * ES256/P-256 전용, platform-java와 와이어 호환(홀더 제시 경로).
  */
 export { AgentKey, didJwkFromPublicJwk, publicJwkFromDidJwk, didFingerprint } from "./key.js";
+export { exchangeSessionToken, SessionExchangeError, type SessionExchangeOptions, type SessionToken } from "./session.js";
 export {
   presentVpToken,
   splitSdJwt,
