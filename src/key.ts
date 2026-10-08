@@ -101,6 +101,8 @@ export class AgentKey {
       jti: opts.jti ?? randomUUID(),
     };
     if (opts.sessionToken !== undefined) {
+      // Node's "ascii" decoding is not Java's US_ASCII above 0x7F: a compact JWS is ASCII, so refuse anything else.
+      if (!/^[\x21-\x7e]*$/.test(opts.sessionToken)) throw new Error("session token is not printable ASCII");
       payload.ath = createHash("sha256").update(Buffer.from(opts.sessionToken, "ascii")).digest("base64url");
     }
     if (opts.body !== undefined) {

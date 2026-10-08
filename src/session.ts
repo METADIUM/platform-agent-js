@@ -17,6 +17,8 @@ export interface SessionExchangeOptions {
   rp: string;
   key: AgentKey;
   fetchImpl?: typeof fetch;
+  /** Per request, default 10 s. */
+  timeoutMs?: number;
 }
 
 export interface SessionToken {
@@ -46,7 +48,9 @@ export async function exchangeSessionToken(o: SessionExchangeOptions): Promise<S
   const base = o.verifierUrl.replace(/\/+$/, "");
   const verifierDid = o.verifierDid ?? verifierDidFromResponseUri(base + "/");
 
-  const nonceRes = await f(base + "/agent/nonce", { method: "POST" });
+  // No redirects: htu is bound to the URL we call, and the verifier never needs to send us elsewhere.
+  const opts = () => ({ redirect: "error" as const, signal: AbortSignal.timeout(o.timeoutMs ?? 10_000) });
+  const nonceRes = await f(base + "/agent/nonce", { method: "POST", ...opts() });
   if (!nonceRes.ok) throw await refusal(nonceRes);
   const { c_nonce: nonce } = (await nonceRes.json()) as { c_nonce: string };
 
@@ -59,6 +63,7 @@ export async function exchangeSessionToken(o: SessionExchangeOptions): Promise<S
     method: "POST",
     headers: { "content-type": "application/json", "agent-proof": proof },
     body,
+    ...opts(),
   });
   if (!res.ok) throw await refusal(res);
   const t = (await res.json()) as { access_token: string; expires_in: number };

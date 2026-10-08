@@ -25,6 +25,11 @@ describe("requestProof", () => {
     await jwtVerify(proof, await importJWK(key.publicJwk, "ES256"));
   });
 
+  it("refuses a session token that is not printable ASCII (Node ascii ≠ Java US_ASCII)", async () => {
+    const key = await AgentKey.generate();
+    await expect(key.requestProof("POST", "https://x", { sessionToken: "abc.déf.ghi" })).rejects.toThrow("ASCII");
+  });
+
   it("omits ath and bh when there is no token or body", async () => {
     const key = await AgentKey.generate();
     const p = decodeJwt(await key.requestProof("GET", "https://rp.example.com/mcp"));
@@ -85,6 +90,21 @@ describe("exchangeSessionToken (§9)", () => {
     expect(proof.bh).toBe(createHash("sha256").update(tokenHit.body).digest("base64url"));
     expect(proof.ath).toBeUndefined();
     expect(tokenHit.headers["content-encoding"]).toBeUndefined();
+  });
+
+  it("does not follow a redirect", async () => {
+    const key = await AgentKey.generate();
+    const target = await verifierStub(() => [200, { access_token: "tok", expires_in: 300 }]);
+    stubs.push(target);
+    const srv = http.createServer((req, res) => {
+      res.writeHead(307, { location: target.url + (req.url ?? "") });   // a working verifier: following would succeed
+      res.end();
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+    stubs.push({ close: () => new Promise<void>((r) => srv.close(() => r())) });
+    const url = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+    await expect(exchangeSessionToken({ verifierUrl: url, vc: vc(), rp: "paas", key })).rejects.toThrow();
+    expect(target.hits).toEqual([]);
   });
 
   it("tells a dropped VC from a retry", async () => {
