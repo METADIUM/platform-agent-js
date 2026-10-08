@@ -83,6 +83,16 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
       return drainAnd(creq, () => json(cres, 401, { error: "unauthorized", hint: "proxy-token 필요 — `status`가 등록 명령을 출력합니다" }));
     }
 
+    // Session state per RP for `status`: a stopped or failing refresh must not read as «delegation valid» (Briefick).
+    if (creq.method === "GET" && path === "/status") {
+      return json(cres, 200, {
+        targets: opts.targets.map((t) => {
+          const st = (t.auth as { state?: () => unknown } | null)?.state?.();
+          return { alias: t.alias, connected: t.auth !== null, pendingReason: t.auth ? undefined : t.pendingReason, session: st };
+        }),
+      });
+    }
+
     // 라우팅: /<alias>/mcp… 또는 (RP 1개일 때) /mcp…
     let target: DaemonTarget | undefined;
     let rest = "";

@@ -61,6 +61,28 @@ describe("daemon", () => {
     expect((await call("/mcp", TOKEN, { method: "tools/list" })).body).toEqual({ from: "a" });
   });
 
+  it("/status needs the token and reports each RP's session, so `status` can't say «valid» while refreshing stopped", async () => {
+    const up = await upstream("A");
+    closers.push(up.close);
+    const stopped = { bearer: () => { throw new Error("세션 만료 — 갱신 중지"); },
+      state: () => ({ stopped: true, failures: 1, lastError: "401: PoP" }) };
+    daemon = await startDaemon({ targets: [
+      { alias: "a", targetMcpUrl: up.url, auth: stopped },
+      { alias: "b", targetMcpUrl: up.url, auth: null, pendingReason: "위임 대기" },
+    ], token: TOKEN });
+    expect((await call("/status")).status).toBe(401);
+    const r = await call("/status", TOKEN);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ targets: [
+      { alias: "a", connected: true, session: { stopped: true, failures: 1, lastError: "401: PoP" } },
+      { alias: "b", connected: false, pendingReason: "위임 대기" },
+    ] });
+    // and an MCP call through the stopped RP gets a 503 naming why, not the RP's 401 for a dead token
+    const m = await call("/a/mcp", TOKEN, { method: "tools/list" });
+    expect(m.status).toBe(503);
+    expect(String((m.body as { message?: string }).message)).toContain("갱신 중지");
+  });
+
   it("alias 라우팅 — RP별 bearer 분리(교차 주입 없음)", async () => {
     const upA = await upstream("briefick");
     const upB = await upstream("minipaas");

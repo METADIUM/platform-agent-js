@@ -279,6 +279,42 @@ export async function recoverSessionFailure(
   return null;
 }
 
+interface DaemonSessionView {
+  alias: string;
+  connected: boolean;
+  pendingReason?: string;
+  session?: { stopped: boolean; stopReason?: string; failures: number; lastError?: string; lastRefreshAt?: string; expiresAt?: string };
+}
+
+/** The running daemon's per-RP session state, or null when it can't be read (stopped, older daemon, wrong token). */
+async function daemonSessions(port: number, token: string): Promise<DaemonSessionView[] | null> {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/status`, {
+      headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(1500),
+    });
+    if (!r.ok) return null;
+    return ((await r.json()) as { targets?: DaemonSessionView[] }).targets ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** One line on the session, or null when it is healthy (the delegation line already says enough). */
+export function sessionLine(t: DaemonSessionView | undefined): string | null {
+  if (!t) return null;
+  if (!t.connected) return `⏸ 세션 미연결: ${t.pendingReason ?? "위임 대기"}`;
+  const s = t.session;
+  if (!s) return null;
+  if (s.stopped) {
+    const fix = s.stopReason === "registration_gone" ? "재등록 필요(register --code)"
+      : s.stopReason === "delegation_refused" ? "지갑에서 새 위임 승인 필요"
+      : "원인 확인 후 데몬 재시작";
+    return `✗ 세션 갱신 중지 — ${fix}${s.lastError ? `: ${s.lastError}` : ""}`;
+  }
+  if (s.failures > 0) return `⚠ 세션 갱신 실패 ${s.failures}회, 재시도 중${s.lastError ? `: ${s.lastError}` : ""}`;
+  return null;
+}
+
 /** 위임 VC(SD-JWT)의 만료 — `validUntil`(ISO) 우선, 없으면 `exp`(epoch 초). 파싱 실패 시 null. */
 function delegationValidUntil(sdJwt: string): Date | null {
   try {
@@ -813,6 +849,7 @@ export async function main(argv: string[]): Promise<number> {
     } catch {
       // stopped
     }
+    const sessions = await daemonSessions(port, token);
     console.log(`agent ${key ? key.fingerprint : "(키 없음)"}  ·  daemon: ${daemon}`);
     if (cfg.rps.length === 0) {
       console.log("  등록된 RP 없음 — add <RP_URL> --code <CODE> 로 시작하세요");
@@ -832,6 +869,8 @@ export async function main(argv: string[]): Promise<number> {
         }
       }
       console.log(`  ${rp.alias.padEnd(10)} ${deleg}`);
+      const sess = sessionLine(sessions?.find((t) => t.alias === rp.alias));
+      if (sess) console.log(`  ${"".padEnd(10)} ${sess}`);
       console.log(`  ${"".padEnd(10)} ${mcpAddCommand(rp.alias, port, token, cfg.rps.length === 1)}`);
     }
     return 0;
