@@ -25,6 +25,8 @@ export interface DaemonTarget {
   auth: BearerSource | null;
   /** auth가 null일 때 503 본문에 실을 사유. */
   pendingReason?: string;
+  /** A delegation the RP refused with §11.1 `keep`: still stored, not presented again by this process. */
+  heldCredential?: string;
 }
 
 export interface DaemonOptions {
