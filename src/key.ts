@@ -6,7 +6,7 @@
  */
 import { SignJWT, importJWK, type JWK, type KeyLike } from "jose";
 import { generateKeyPair, exportJWK } from "jose";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 const ALG = "ES256";
 
@@ -81,6 +81,35 @@ export class AgentKey {
       .setProtectedHeader({ alg: ALG })
       .setIssuedAt()
       .setAudience(audience)
+      .sign(this.privateKey);
+  }
+
+  /**
+   * Request proof (spec agent-delegation §11) — typ agent-request+jwt, kid `<did:jwk>#0`; payload htm, htu, iat,
+   * jti, `ath` (session token, on calls only) and `bh` (body bytes, sent exactly as hashed). Wire-compatible with
+   * platform-java `AgentRequestProof`.
+   */
+  async requestProof(
+    htm: string,
+    htu: string,
+    opts: { body?: Uint8Array; sessionToken?: string; jti?: string; iat?: number } = {},
+  ): Promise<string> {
+    const payload: Record<string, unknown> = {
+      htm,
+      htu,
+      iat: opts.iat ?? Math.floor(Date.now() / 1000),
+      jti: opts.jti ?? randomUUID(),
+    };
+    if (opts.sessionToken !== undefined) {
+      // Node's "ascii" decoding is not Java's US_ASCII above 0x7F: a compact JWS is ASCII, so refuse anything else.
+      if (!/^[\x21-\x7e]*$/.test(opts.sessionToken)) throw new Error("session token is not printable ASCII");
+      payload.ath = createHash("sha256").update(Buffer.from(opts.sessionToken, "ascii")).digest("base64url");
+    }
+    if (opts.body !== undefined) {
+      payload.bh = createHash("sha256").update(opts.body).digest("base64url");
+    }
+    return new SignJWT(payload)
+      .setProtectedHeader({ typ: "agent-request+jwt", alg: ALG, kid: this.did + "#0" })
       .sign(this.privateKey);
   }
 
