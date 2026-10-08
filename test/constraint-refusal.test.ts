@@ -74,6 +74,29 @@ describe("the daemon on a session refused for its constraints", () => {
     expect(exchange.mock.calls.map((c) => c[0]), "a new delegation does not replace the held one").toEqual(["OLD", "NEW"]);
   });
 
+  it("keep names the keys when the RP returns them", async () => {
+    const exchange = vi.fn().mockRejectedValueOnce(
+      new AgentClientError("세션 거부: constraints_unknown_key", undefined, {
+        status: "rejected", reasons: ["constraints_unknown_key"], keys: ["maxDeploysPerDay"],
+      }),
+    );
+    void run(exchange, vi.fn(() => new Promise<string>(() => {})));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(target.pendingReason).toContain("maxDeploysPerDay");
+  });
+
+  it("🔴 keep: the reason survives a retrieve timeout while the held VC is still stored", async () => {
+    const exchange = vi.fn().mockRejectedValueOnce(rejected("constraints_unknown_key"));
+    const waitForDelegation = vi.fn()
+      .mockRejectedValueOnce(new AgentClientError("위임 회수 타임아웃"))
+      .mockImplementation(() => new Promise<string>(() => {}));
+    void run(exchange, waitForDelegation);
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(waitForDelegation, "the timeout path was not exercised").toHaveBeenCalledTimes(2);
+    expect(target.pendingReason, "a retrieve timeout replaced the held reason").toContain("constraints_unknown_key");
+    expect(exchange, "the held VC was presented again after the timeout").toHaveBeenCalledTimes(1);
+  });
+
   it("drop: the VC is discarded and a new delegation is awaited (control)", async () => {
     const waitForDelegation = vi.fn().mockResolvedValue("NEW");
     const exchange = vi.fn().mockRejectedValueOnce(rejected("constraints_not_atomic")).mockResolvedValue(issued);

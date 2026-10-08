@@ -232,9 +232,10 @@ function clearCredential(store: AgentStore, data: KeyStore, url: string): boolea
 
 /** The RP refused the delegation for a limit it does not understand (spec §11.1 `keep`): the VC stays, unused. */
 export class DelegationHeldError extends Error {
-  constructor(url: string, readonly reasons: string[]) {
+  constructor(url: string, readonly reasons: string[], readonly keys: string[] = []) {
     super(
-      `RP 가 이 위임의 제약을 이해하지 못합니다(${reasons.join(",")}) — 위임은 보관하고 재시도하지 않습니다. ` +
+      `RP 가 이 위임의 제약을 이해하지 못합니다(${reasons.join(",")}${keys.length ? ": " + keys.join(",") : ""}) — ` +
+        "위임은 보관하고 재시도하지 않습니다. " +
         `RP 가 갱신되면 다시 시작하거나, 지갑에서 새 위임을 승인하세요(${url})`,
     );
     this.name = "DelegationHeldError";
@@ -261,9 +262,10 @@ export async function recoverSessionFailure(
     throw new AgentClientError(registerGuide(e, url), e.httpStatus, e.body);
   }
   if (e.message.includes("세션 거부")) {
-    const reasons = (e.body as { reasons?: unknown } | undefined)?.reasons;
-    const list = Array.isArray(reasons) ? reasons.filter((r): r is string => typeof r === "string") : [];
-    if (constraintRefusalAction(list) === "keep") throw new DelegationHeldError(url, list);
+    const body = e.body as { reasons?: unknown; keys?: unknown } | undefined;
+    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+    const list = strings(body?.reasons);
+    if (constraintRefusalAction(list) === "keep") throw new DelegationHeldError(url, list, strings(body?.keys));
     console.error(`위임이 무효화됐습니다(${e.message}) — 캐시를 비우고 지갑 재발급 승인 대기로 전환합니다`);
     clearCredential(store, data, url);
     return waitCredential(client, data, url, store, key);
@@ -455,9 +457,12 @@ export async function connectTarget(
       );
       return;
     } catch (e) {
-      target.pendingReason =
-        e instanceof DelegationHeldError ? e.message : `연결 실패 — 60초 후 재시도: ${e instanceof Error ? e.message : String(e)}`;
-      console.error(`[${rp.alias}] ${target.pendingReason}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      // While the held VC is still the stored one, a later failure (a retrieve timeout) must not replace the reason.
+      const stillHeld = target.heldCredential !== undefined && target.heldCredential === data.credentials?.[rp.url];
+      if (e instanceof DelegationHeldError) target.pendingReason = msg;
+      else if (!stillHeld) target.pendingReason = `연결 실패 — 60초 후 재시도: ${msg}`;
+      console.error(`[${rp.alias}] ${stillHeld && !(e instanceof DelegationHeldError) ? `새 위임 대기 — 60초 후 재확인: ${msg}` : target.pendingReason}`);
       await new Promise((r) => setTimeout(r, 60_000));
     }
   }
@@ -509,6 +514,11 @@ export const helpText = (inv: string = invocation()): string => `platform-agent 
   did                이 에이전트 did:jwk 출력
   session            위임 세션 bearer 1회 발급(stdout)
   credentials clear  캐시된 위임 VC 삭제(--url 지정 시 해당 RP만) — 위임 철회 후 재발급 대기로 전환
+
+위임 제약 거부(spec §11.1):
+  constraints_missing·_malformed·_not_atomic → 그 위임은 어디서도 못 쓴다 — VC 를 지우고 재발급 대기
+  constraints_unknown_key → RP 가 아직 모르는 제약 — VC 는 보관하고 재시도하지 않는다.
+                     RP 가 갱신되면 데몬을 다시 시작하면 된다(재시작이 곧 재시도)
 
 옵션:
   --url <URL>        Briefick 베이스 URL (또는 env BRIEFICK_URL)
