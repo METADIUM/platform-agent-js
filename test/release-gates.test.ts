@@ -16,7 +16,9 @@ function runBlocks(yml: string): { line: number; script: string }[] {
     if (!m) continue;
     const indent = m[1].length;
     let script: string;
-    if (m[2] === "|" || m[2] === ">") {
+    // Only a plain `|` block is read; any other block indicator (`|-`, `|+`, `>`, …) would be read wrong.
+    if (/^[|>]/.test(m[2]) && m[2] !== "|") throw new Error(`line ${i + 1}: unsupported run block indicator ${m[2]}`);
+    if (m[2] === "|") {
       const body: string[] = [];
       for (let j = i + 1; j < lines.length; j++) {
         const l = lines[j];
@@ -39,9 +41,15 @@ describe("workflow run blocks parse as bash", () => {
     expect(bashN("node -e '\n  // the receiver's repo\n  console.log(\"x\");\n'").status).not.toBe(0);
   });
 
-  for (const f of readdirSync(WORKFLOWS).filter((n) => n.endsWith(".yml"))) {
+  it("control: an unsupported block indicator fails loudly", () => {
+    expect(() => runBlocks("    - run: >-\n        echo hi\n")).toThrow(/unsupported/);
+  });
+
+  for (const f of readdirSync(WORKFLOWS).filter((n) => /\.ya?ml$/.test(n))) {
     it(f, () => {
-      const blocks = runBlocks(readFileSync(join(WORKFLOWS, f), "utf8"));
+      const yml = readFileSync(join(WORKFLOWS, f), "utf8");
+      expect(yml, `${f} runs a step under a shell this test does not check`).not.toMatch(/^\s*(?:-\s+)?shell:\s*(?!bash\b)/m);
+      const blocks = runBlocks(yml);
       expect(blocks.length, `no run: blocks found in ${f} — the extractor is blind`).toBeGreaterThan(0);
       for (const b of blocks) {
         const r = bashN(b.script);
