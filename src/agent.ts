@@ -71,6 +71,16 @@ export function isPermanentAuthFailure(err: unknown): boolean {
   return false; // TypeError('fetch failed') 등 네트워크 — 일시적
 }
 
+/** Reasons an RP's `rejected` gives when the agent's registration, not the delegation, is gone (Briefick). */
+const REGISTRATION_GONE = new Set(["registration_revoked", "agent_not_registered"]);
+
+function stopReasonOf(e: unknown): SessionState["stopReason"] {
+  const body = e instanceof AgentClientError ? (e.body as { status?: string; reasons?: unknown } | undefined) : undefined;
+  if (body?.status !== "rejected") return "other";
+  const reasons = Array.isArray(body.reasons) ? body.reasons : [];
+  return reasons.some((r) => typeof r === "string" && REGISTRATION_GONE.has(r)) ? "registration_gone" : "delegation_refused";
+}
+
 /**
  * 사용 예:
  * ```ts
@@ -159,10 +169,7 @@ export class AgentAuth {
     this.failures++;
     this.lastError = e instanceof Error ? e.message : String(e);
     this.opts.onError?.(e);
-    if (isPermanentAuthFailure(e)) {
-      const refused = e instanceof AgentClientError && (e.body as { status?: string } | undefined)?.status === "rejected";
-      return this.fatal(e, refused ? "delegation_refused" : "other");
-    }
+    if (isPermanentAuthFailure(e)) return this.fatal(e, stopReasonOf(e));
     if (e instanceof AgentClientError && e.httpStatus === 401) {
       // Revoked, or a passing PoP failure? Only the RP knows. `no_agent` is its «registration gone».
       this.opts.client.retrieveDelegation().then(

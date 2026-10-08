@@ -134,6 +134,19 @@ describe("AgentAuth — 영구 실패에서 루프가 멈춘다", () => {
     expect(auth.state()).toMatchObject({ stopped: true, stopReason: "delegation_refused" });
   });
 
+  it("a rejected registration (registration_revoked, agent_not_registered) stops as registration_gone: re-register", async () => {
+    for (const reason of ["registration_revoked", "agent_not_registered"]) {
+      vi.useFakeTimers();
+      const gone = new AgentClientError(`세션 거부: ${reason}`, undefined, { status: "rejected", reasons: [reason] });
+      const { client } = fakeClient([issued("A", 10_000), gone]);
+      const auth = new AgentAuth({ client, credential: "VC~", retryMs: 1_000 });
+      await auth.start();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(auth.state(), reason).toMatchObject({ stopped: true, stopReason: "registration_gone" });
+      vi.useRealTimers();
+    }
+  });
+
   it("backoff doubles per consecutive failure and stops growing at MAX_RETRY_MS", async () => {
     vi.useFakeTimers();
     const { client, calls } = fakeClient([issued("A", 10_000), "fail"]);
