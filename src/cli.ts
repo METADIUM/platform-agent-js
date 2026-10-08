@@ -283,7 +283,7 @@ interface DaemonSessionView {
   alias: string;
   connected: boolean;
   pendingReason?: string;
-  session?: { stopped: boolean; failures: number; lastError?: string; lastRefreshAt?: string; expiresAt?: string };
+  session?: { stopped: boolean; stopReason?: string; failures: number; lastError?: string; lastRefreshAt?: string; expiresAt?: string };
 }
 
 /** The running daemon's per-RP session state, or null when it can't be read (stopped, older daemon, wrong token). */
@@ -305,7 +305,12 @@ export function sessionLine(t: DaemonSessionView | undefined): string | null {
   if (!t.connected) return `⏸ 세션 미연결: ${t.pendingReason ?? "위임 대기"}`;
   const s = t.session;
   if (!s) return null;
-  if (s.stopped) return `✗ 세션 갱신 중지 — 재등록 필요(register --code)${s.lastError ? `: ${s.lastError}` : ""}`;
+  if (s.stopped) {
+    const fix = s.stopReason === "registration_gone" ? "재등록 필요(register --code)"
+      : s.stopReason === "delegation_refused" ? "지갑에서 새 위임 승인 필요"
+      : "원인 확인 후 데몬 재시작";
+    return `✗ 세션 갱신 중지 — ${fix}${s.lastError ? `: ${s.lastError}` : ""}`;
+  }
   if (s.failures > 0) return `⚠ 세션 갱신 실패 ${s.failures}회, 재시도 중${s.lastError ? `: ${s.lastError}` : ""}`;
   return null;
 }

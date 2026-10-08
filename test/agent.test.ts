@@ -102,6 +102,7 @@ describe("AgentAuth — 영구 실패에서 루프가 멈춘다", () => {
     await vi.advanceTimersByTimeAsync(60_000);  // 한참 기다려도
     expect(calls()).toBe(2);                    // 최초 + 401 1회뿐 — **재시도 없음**
     expect(errors.length).toBe(1);              // onError 도 더는 안 온다(조용한 무한루프의 반대)
+    expect(auth.state().stopReason).toBe("registration_gone");
   });
 
   it("🔴 401 while the RP still knows the agent: retry with backoff, never stop (Briefick, 34 h outage)", async () => {
@@ -121,6 +122,16 @@ describe("AgentAuth — 영구 실패에서 루프가 멈춘다", () => {
     expect(auth.bearer()).toBe("B");
     expect(auth.state()).toMatchObject({ stopped: false, failures: 0 });
     auth.stop();
+  });
+
+  it("a refused delegation stops with delegation_refused, so status asks for a new delegation, not re-registration", async () => {
+    vi.useFakeTimers();
+    const refused = new AgentClientError("세션 거부: revoked", undefined, { status: "rejected", reasons: ["revoked"] });
+    const { client } = fakeClient([issued("A", 10_000), refused]);
+    const auth = new AgentAuth({ client, credential: "VC~", retryMs: 1_000 });
+    await auth.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(auth.state()).toMatchObject({ stopped: true, stopReason: "delegation_refused" });
   });
 
   it("backoff doubles per consecutive failure and stops growing at MAX_RETRY_MS", async () => {

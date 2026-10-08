@@ -31,6 +31,8 @@ export const MAX_RETRY_MS = 5 * 60_000;
 export interface SessionState {
   /** Refreshing stopped for good (registration gone, delegation refused). */
   stopped: boolean;
+  /** Why it stopped, so `status` can say what fixes it: re-register, or approve a new delegation. */
+  stopReason?: "registration_gone" | "delegation_refused" | "other";
   /** Consecutive failed refreshes since the last success. */
   failures: number;
   lastError?: string;
@@ -83,6 +85,7 @@ export class AgentAuth {
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = false;
   private failures = 0;
+  private stopReason?: SessionState["stopReason"];
   private lastError?: string;
   private lastRefreshAt?: Date;
 
@@ -104,7 +107,7 @@ export class AgentAuth {
   }
 
   state(): SessionState {
-    return { stopped: this.stopped, failures: this.failures, lastError: this.lastError,
+    return { stopped: this.stopped, stopReason: this.stopReason, failures: this.failures, lastError: this.lastError,
       lastRefreshAt: this.lastRefreshAt, expiresAt: this.expiresAt };
   }
 
@@ -156,11 +159,14 @@ export class AgentAuth {
     this.failures++;
     this.lastError = e instanceof Error ? e.message : String(e);
     this.opts.onError?.(e);
-    if (isPermanentAuthFailure(e)) return this.fatal(e);
+    if (isPermanentAuthFailure(e)) {
+      const refused = e instanceof AgentClientError && (e.body as { status?: string } | undefined)?.status === "rejected";
+      return this.fatal(e, refused ? "delegation_refused" : "other");
+    }
     if (e instanceof AgentClientError && e.httpStatus === 401) {
       // Revoked, or a passing PoP failure? Only the RP knows. `no_agent` is its «registration gone».
       this.opts.client.retrieveDelegation().then(
-        (r) => (r.status === "no_agent" ? this.fatal(e) : this.retrySoon()),
+        (r) => (r.status === "no_agent" ? this.fatal(e, "registration_gone") : this.retrySoon()),
         () => this.retrySoon(),
       );
       return;
@@ -168,8 +174,9 @@ export class AgentAuth {
     this.retrySoon();
   }
 
-  private fatal(e: unknown): void {
+  private fatal(e: unknown, reason: SessionState["stopReason"]): void {
     this.stopped = true;
+    this.stopReason = reason;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     this.opts.onFatal?.(e);

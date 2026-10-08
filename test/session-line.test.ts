@@ -2,9 +2,12 @@ import { describe, it, expect } from "vitest";
 import { sessionLine } from "../src/cli.js";
 
 describe("status: the session line", () => {
-  it("says refreshing stopped, with the error, instead of leaving «위임 유효» alone", () => {
-    expect(sessionLine({ alias: "b", connected: true, session: { stopped: true, failures: 1, lastError: "401: PoP" } }))
-      .toBe("✗ 세션 갱신 중지 — 재등록 필요(register --code): 401: PoP");
+  it("says refreshing stopped, with the error and what fixes it for that cause (Briefick)", () => {
+    const line = (stopReason: string) =>
+      sessionLine({ alias: "b", connected: true, session: { stopped: true, stopReason, failures: 1, lastError: "e" } });
+    expect(line("registration_gone")).toBe("✗ 세션 갱신 중지 — 재등록 필요(register --code): e");
+    expect(line("delegation_refused")).toBe("✗ 세션 갱신 중지 — 지갑에서 새 위임 승인 필요: e");
+    expect(line("other")).toBe("✗ 세션 갱신 중지 — 원인 확인 후 데몬 재시작: e");
   });
   it("says it is retrying, with the count", () => {
     expect(sessionLine({ alias: "b", connected: true, session: { stopped: false, failures: 3, lastError: "fetch failed" } }))
