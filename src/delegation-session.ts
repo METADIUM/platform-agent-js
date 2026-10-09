@@ -17,13 +17,15 @@ export interface CallAuth {
 export type SessionState =
   | { status: "starting" }
   | { status: "active"; expiresAt: string }
+  /** The token is capped at the delegation's end and can't be refreshed further: a new delegation is needed. */
+  | { status: "ending"; expiresAt: string }
   | { status: "retrying"; expiresAt?: string; lastError: string }
   | { status: "dropped"; error: string };
 
 /** No usable token: the daemon answers the MCP client locally (§9.1). */
 export class SessionUnavailable extends Error {
   constructor(
-    readonly error: "verifier_unreachable" | "delegation_dropped" | "session_starting",
+    readonly error: "verifier_unreachable" | "delegation_dropped" | "delegation_ended" | "session_starting",
     message: string,
   ) {
     super(message);
@@ -89,6 +91,9 @@ export class DelegationSessionAuth implements CallAuth {
       throw new SessionUnavailable("delegation_dropped", `the delegation was refused: ${this.current.error}`);
     }
     // Never past exp, and never extended here (§9.1).
+    if (t && this.current.status === "ending" && this.now() >= t.expiresAt.getTime()) {
+      throw new SessionUnavailable("delegation_ended", "the delegation has ended; approve a new one in the wallet");
+    }
     if (!t || this.now() >= t.expiresAt.getTime()) {
       throw new SessionUnavailable(
         t ? "verifier_unreachable" : "session_starting",
@@ -114,7 +119,10 @@ export class DelegationSessionAuth implements CallAuth {
       this.current = { status: "active", expiresAt: t.expiresAt.toISOString() };
       // A token capped at the delegation's end can't be extended: exchanging again returns the same exp, so stop
       // instead of spinning through the last minute (minipaas, on #41).
-      if (previous && t.expiresAt.getTime() <= previous.expiresAt.getTime()) return;
+      if (previous && t.expiresAt.getTime() <= previous.expiresAt.getTime()) {
+        this.current = { status: "ending", expiresAt: t.expiresAt.toISOString() };
+        return;
+      }
       const remaining = t.expiresAt.getTime() - this.now();
       this.next(remaining > REFRESH_AHEAD_MS ? remaining - REFRESH_AHEAD_MS : Math.max(1_000, remaining / 2));
     } catch (e) {

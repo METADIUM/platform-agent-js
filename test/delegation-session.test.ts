@@ -78,6 +78,10 @@ describe("DelegationSessionAuth", () => {
     await c.fire();
     expect(exchanges, "the refresh kept exchanging a token it can't extend").toBe(2);
     expect(c.scheduled).toEqual([15_000]);
+    expect(s.state().status).toBe("ending");
+    c.advance(30_000);
+    const e = await s.callHeaders("POST", "https://rp.example/mcp", new Uint8Array()).catch((x) => x);
+    expect((e as SessionUnavailable).error, "past the cap the user was told it was retrying").toBe("delegation_ended");
   });
 
   it("backs off 1, 2, 4 … s up to 30 s while the verifier is down, and keeps retrying", async () => {
