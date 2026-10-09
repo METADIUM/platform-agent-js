@@ -64,6 +64,22 @@ describe("DelegationSessionAuth", () => {
     expect(c.scheduled).toEqual([300_000 - REFRESH_AHEAD_MS]);
   });
 
+  it("a token capped under 60 s refreshes once, then stops when exp can't move (no spin in the last minute)", async () => {
+    const c = clock();
+    const capped = new Date(c.now() + 30_000);
+    let exchanges = 0;
+    const s = new DelegationSessionAuth({
+      key: await AgentKey.generate(), verifier: "v", now: c.now, schedule: c.schedule,
+      exchange: async () => { exchanges++; return { accessToken: "a.b.c", expiresIn: 30, expiresAt: capped }; },
+    });
+    await s.start();
+    expect(c.scheduled).toEqual([15_000]);
+    await c.fire();
+    await c.fire();
+    expect(exchanges, "the refresh kept exchanging a token it can't extend").toBe(2);
+    expect(c.scheduled).toEqual([15_000]);
+  });
+
   it("backs off 1, 2, 4 … s up to 30 s while the verifier is down, and keeps retrying", async () => {
     const c = clock();
     let fail = false;

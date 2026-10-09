@@ -108,10 +108,15 @@ export class DelegationSessionAuth implements CallAuth {
     if (this.stopped) return;
     try {
       const t = await this.o.exchange();
+      const previous = this.token;
       this.token = t;
       this.backoff = 1_000;
       this.current = { status: "active", expiresAt: t.expiresAt.toISOString() };
-      this.next(Math.max(0, t.expiresAt.getTime() - REFRESH_AHEAD_MS - this.now()));
+      // A token capped at the delegation's end can't be extended: exchanging again returns the same exp, so stop
+      // instead of spinning through the last minute (minipaas, on #41).
+      if (previous && t.expiresAt.getTime() <= previous.expiresAt.getTime()) return;
+      const remaining = t.expiresAt.getTime() - this.now();
+      this.next(remaining > REFRESH_AHEAD_MS ? remaining - REFRESH_AHEAD_MS : Math.max(1_000, remaining / 2));
     } catch (e) {
       const err = e as Partial<SessionExchangeError>;
       if (err.dropVc) {
