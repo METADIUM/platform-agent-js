@@ -16,13 +16,14 @@ import net from "node:net";
 import { timingSafeEqual } from "node:crypto";
 import { URL } from "node:url";
 import type { BearerSource } from "./proxy.js";
+import { isCallAuth, SessionUnavailable, type CallAuth } from "./delegation-session.js";
 
 export interface DaemonTarget {
   alias: string;
   /** 포워딩 대상 MCP URL (예: https://briefick.cplabs.io/api/mcp). */
   targetMcpUrl: string;
-  /** null = 위임 미확보(대기 중) — 해당 경로는 503 + 안내. */
-  auth: BearerSource | null;
+  /** null = 위임 미확보(대기 중) — 해당 경로는 503 + 안내. A `CallAuth` target speaks `/1` (spec §10). */
+  auth: BearerSource | CallAuth | null;
   /** auth가 null일 때 503 본문에 실을 사유. */
   pendingReason?: string;
   /** A delegation the RP refused with §11.1 `keep`: still stored, not presented again by this process. */
@@ -144,7 +145,7 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
         // 비JSON(GET 등) — HTTP 메서드로 기록
       }
       audit(`[audit] ${new Date().toISOString()} ${target.alias} ${method}`);
-      forward(target, rest, creq, cres, body);
+      void forward(target, rest, creq, cres, body);
     });
   });
 
@@ -196,25 +197,37 @@ function portInUse(host: string, port: number): Promise<boolean> {
 }
 
 /** 대상 RP로 투명 포워딩 — Authorization만 해당 RP의 최신 bearer로 교체(SSE 응답 스트림 유지). */
-function forward(
+async function forward(
   target: DaemonTarget,
   restPath: string,
   creq: http.IncomingMessage,
   cres: http.ServerResponse,
   body: Buffer,
-): void {
+  retriedClock = false,
+): Promise<void> {
   const url = new URL(target.targetMcpUrl);
   const upstream = url.protocol === "https:" ? https : http;
   const headers: Record<string, string | string[]> = {};
   for (const [k, v] of Object.entries(creq.headers)) {
-    if (v !== undefined && !HOP_BY_HOP.has(k.toLowerCase())) headers[k] = v;
+    if (v !== undefined && !HOP_BY_HOP.has(k.toLowerCase()) && k.toLowerCase() !== "agent-proof") headers[k] = v;
   }
   headers["host"] = url.host;
   headers["content-length"] = String(body.length);
-  try {
-    headers["authorization"] = `Bearer ${target.auth!.bearer()}`;
-  } catch (e) {
-    return json(cres, 503, { error: "bearer_unavailable", alias: target.alias, message: String(e) });
+  const auth = target.auth!;
+  if (isCallAuth(auth)) {
+    try {
+      // §11: htu is the public URL the agent called, without the query.
+      Object.assign(headers, await auth.callHeaders(creq.method ?? "GET", url.origin + url.pathname + restPath, body));
+    } catch (e) {
+      const error = e instanceof SessionUnavailable ? e.error : "session_unavailable";
+      return json(cres, 503, { error, alias: target.alias, message: (e as Error).message });
+    }
+  } else {
+    try {
+      headers["authorization"] = `Bearer ${auth.bearer()}`;
+    } catch (e) {
+      return json(cres, 503, { error: "bearer_unavailable", alias: target.alias, message: String(e) });
+    }
   }
 
   const preq = upstream.request(
@@ -227,6 +240,15 @@ function forward(
       headers,
     },
     (pres) => {
+      // §11: once, with the clock offset the RP's Date header gives.
+      const date = pres.headers["date"] ? Date.parse(pres.headers["date"]) : NaN;
+      if (isCallAuth(auth) && !retriedClock && pres.statusCode === 401
+          && /error="use_fresh_time"/.test(String(pres.headers["www-authenticate"] ?? "")) && !Number.isNaN(date)) {
+        pres.resume();
+        auth.setClockOffset(Math.round((date - Date.now()) / 1000));
+        void forward(target, restPath, creq, cres, body, true);
+        return;
+      }
       cres.writeHead(pres.statusCode ?? 502, pres.headers);
       pres.pipe(cres);
     },
