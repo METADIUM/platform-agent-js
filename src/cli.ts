@@ -19,6 +19,8 @@ import { hostname } from "node:os";
 import { AgentKey } from "./key.js";
 import { AgentClientError, BriefickAgentClient, isRequestExpired, DEFAULT_SERVICE } from "./briefick.js";
 import { AgentAuth } from "./agent.js";
+import { DelegationSessionAuth, type SessionState } from "./delegation-session.js";
+import { exchangeSessionToken } from "./session.js";
 import { constraintRefusalAction } from "./constraint-refusal.js";
 import { startProxy, type BearerSource } from "./proxy.js";
 import { defaultKeyFile, loadStore, openStore, type AgentStore, type KeyStore } from "./keystore.js";
@@ -45,6 +47,11 @@ interface Args {
   port?: number;
   mcpPath?: string;
   alias?: string;
+  /** `add --verifier`: the RP serves `/1`, and this verifier issues its session tokens (§9). */
+  verifier?: string;
+  verifierRp?: string;
+  /** The third positional, e.g. the file in `credentials import`. */
+  arg2?: string;
   insecureNoToken: boolean;
   install: boolean;
   uninstallFlag: boolean;
@@ -95,6 +102,8 @@ function parse(argv: string[]): Args {
     }
     else if (a === "--mcp-path") out.mcpPath = val();
     else if (a === "--alias") out.alias = val();
+    else if (a === "--verifier") out.verifier = val();
+    else if (a === "--verifier-rp") out.verifierRp = val();
     else if (a === "--label") out.label = val();
     else if (a === "--insecure-no-token") out.insecureNoToken = true;
     else if (a === "--install") out.install = true;
@@ -114,6 +123,7 @@ function parse(argv: string[]): Args {
   }
   out.cmd ??= rest[0];
   out.sub = rest[1];
+  out.arg2 = rest[2];
   out.url ??= process.env.BRIEFICK_URL;
   out.code ??= process.env.PAIRING_CODE;
   out.keyFile ||= defaultKeyFile();
@@ -283,8 +293,10 @@ interface DaemonSessionView {
   alias: string;
   connected: boolean;
   pendingReason?: string;
-  session?: { stopped: boolean; stopReason?: string; failures: number; lastError?: string; lastRefreshAt?: string; expiresAt?: string };
+  session?: V0Session | SessionState;
 }
+
+interface V0Session { stopped: boolean; stopReason?: string; failures: number; lastError?: string; lastRefreshAt?: string; expiresAt?: string }
 
 /** The running daemon's per-RP session state, or null when it can't be read (stopped, older daemon, wrong token). */
 async function daemonSessions(port: number, token: string): Promise<DaemonSessionView[] | null> {
@@ -303,8 +315,9 @@ async function daemonSessions(port: number, token: string): Promise<DaemonSessio
 export function sessionLine(t: DaemonSessionView | undefined): string | null {
   if (!t) return null;
   if (!t.connected) return `⏸ 세션 미연결: ${t.pendingReason ?? "위임 대기"}`;
+  if (!t.session) return null;
+  if ("status" in t.session) return v1SessionLine(t.session);
   const s = t.session;
-  if (!s) return null;
   if (s.stopped) {
     const fix = s.stopReason === "registration_gone" ? "재등록 필요(register --code)"
       : s.stopReason === "delegation_refused" ? "지갑에서 새 위임 승인 필요"
@@ -313,6 +326,23 @@ export function sessionLine(t: DaemonSessionView | undefined): string | null {
   }
   if (s.failures > 0) return `⚠ 세션 갱신 실패 ${s.failures}회, 재시도 중${s.lastError ? `: ${s.lastError}` : ""}`;
   return null;
+}
+
+function v1SessionLine(s: SessionState): string | null {
+  switch (s.status) {
+    case "active":
+      return null;
+    case "starting":
+      return "⏳ 세션 발급 중(/1)";
+    case "ending":
+      return `⚠ 위임 종료 임박 — 세션 연장 불가(${s.expiresAt}), 지갑에서 새 위임 승인 필요`;
+    case "retrying":
+      return `⚠ 세션 발급 재시도 중: ${s.lastError}`;
+    case "dropped":
+      return `✗ 위임 폐기 — 새 위임 필요: ${s.error}`;
+    case "held":
+      return `⏸ ${heldMessage(s)}`;
+  }
 }
 
 /** 위임 VC(SD-JWT)의 만료 — `validUntil`(ISO) 우선, 없으면 `exp`(epoch 초). 파싱 실패 시 null. */
@@ -505,6 +535,69 @@ export async function connectTarget(
 }
 
 
+/** The `/1` target (spec §9–§11): exchange the stored VC at the verifier, and sign each call. */
+export async function connectV1Target(
+  target: DaemonTarget,
+  data: KeyStore,
+  rp: DaemonRp & { verifierUrl: string },
+  store: AgentStore,
+  key: AgentKey,
+): Promise<DelegationSessionAuth | null> {
+  const credential = data.credentials?.[rp.url];
+  if (!credential) {
+    target.pendingReason = `위임 VC 없음 — credentials import --url ${rp.url} <파일>`;
+    return null;
+  }
+  const held = data.held?.[rp.url];
+  if (held?.credential === credential) {
+    target.pendingReason = heldMessage(held);
+    return null;
+  }
+  const vc: string = credential;
+  // Persisted, so a restart doesn't present a refused VC again (§11.1).
+  // Re-read before writing: `credentials import`/`unhold` may have changed the store since `up` (metapass-saas).
+  const persistStopped = (s: Extract<SessionState, { status: "dropped" | "held" }>): void => {
+    const fresh = store.load();
+    if (!fresh || fresh.credentials?.[rp.url] !== vc) return;
+    if (s.status === "dropped") {
+      const { [rp.url]: _gone, ...rest } = fresh.credentials;
+      fresh.credentials = rest;
+      console.error(`[${rp.alias}] 위임 폐기(${s.error}) — 저장된 VC 삭제, 새 위임 필요`);
+    } else {
+      const { status: _s, ...h } = s;
+      const record = { credential: vc, ...h };
+      fresh.held = { ...(fresh.held ?? {}), [rp.url]: record };
+      console.error(`[${rp.alias}] ${heldMessage(record)}`);
+    }
+    store.save(fresh);
+    data.credentials = fresh.credentials;
+    data.held = fresh.held;
+  };
+  const auth = new DelegationSessionAuth({
+    key,
+    verifier: rp.verifierUrl,
+    exchange: () => exchangeSessionToken({ verifierUrl: rp.verifierUrl, vc, rp: rp.verifierRp ?? rp.alias, key }),
+    onStopped: (s) => {
+      try {
+        persistStopped(s);
+      } catch (e) {
+        // Thrown from the session's callback, this would end the daemon (Briefick).
+        console.error(`[${rp.alias}] 위임 상태 저장 실패: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  });
+  target.auth = auth;
+  await auth.start();
+  console.error(`[${rp.alias}] /1 연결 → ${target.targetMcpUrl} (검증자 ${rp.verifierUrl})`);
+  return auth;
+}
+
+function heldMessage(h: { reason: string; keys: string[]; keysTotal?: number }): string {
+  const more = h.keysTotal !== undefined && h.keysTotal > h.keys.length ? ` 외 ${h.keysTotal - h.keys.length}개` : "";
+  return `위임 보류(${h.reason}${h.keys.length ? ": " + h.keys.join(", ") + more : ""}) — RP 가 이 제약을 모른다. ` +
+    "RP 갱신 후 credentials unhold --url 또는 새 위임";
+}
+
 /**
  * 사용자가 방금 친 «그 호출 형태» — 도움말과 안내 문구가 이걸로 자기를 부른다.
  *
@@ -550,11 +643,14 @@ export const helpText = (inv: string = invocation()): string => `platform-agent 
   did                이 에이전트 did:jwk 출력
   session            위임 세션 bearer 1회 발급(stdout)
   credentials clear  캐시된 위임 VC 삭제(--url 지정 시 해당 RP만) — 위임 철회 후 재발급 대기로 전환
+  credentials import --url <RP> <파일>   /1 RP 의 위임 VC 저장(§8 회수 전까지의 경로)
+  credentials unhold --url <RP>          /1 에서 보류한 위임을 다시 제시(RP 갱신 후)
 
 위임 제약 거부(spec §11.1):
   constraints_missing·_malformed·_not_atomic → 그 위임은 어디서도 못 쓴다 — VC 를 지우고 재발급 대기
   constraints_unknown_key → RP 가 아직 모르는 제약 — VC 는 보관하고 재시도하지 않는다.
-                     RP 가 갱신되면 데몬을 다시 시작하면 된다(재시작이 곧 재시도)
+                     RP 가 갱신되면 데몬을 다시 시작하면 된다(재시작이 곧 재시도).
+                     /1 RP 는 보류가 재시작 뒤에도 남는다 — credentials unhold --url 로 푼다
 
 옵션:
   --url <URL>        Briefick 베이스 URL (또는 env BRIEFICK_URL)
@@ -563,6 +659,9 @@ export const helpText = (inv: string = invocation()): string => `platform-agent 
   --port <N>         proxy·up 리슨 포트 (기본 8787, 127.0.0.1 전용)
                      up 에 주면 **이번 실행만** — 설정에 저장하지 않는다
   --mcp-path <PATH>  RP MCP 경로 (기본 /api/mcp)
+  --verifier <URL>   add: 이 RP 는 /1 — 이 검증자(예: https://sso.cplabs.io)에서 세션 토큰을 받는다.
+                     페어링 코드 없이 저장한다(§7 페어링은 아직 RP 쪽에서)
+  --verifier-rp <이름>  add: 검증자 등록부의 RP 별칭(기본 alias)
   --key-file <PATH>  키 파일 경로 (기본 ~/.metapass-agent/key.json, env METAPASS_AGENT_KEY_FILE)
   --key-backend <B>  키 저장 백엔드: file(기본) | keychain (env METAPASS_AGENT_KEY_BACKEND)
                      keychain = macOS Keychain(security) / Linux libsecret(secret-tool) — 평문 파일 없음.
@@ -746,7 +845,34 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (args.cmd === "credentials") {
-    if (args.sub !== "clear") return fail("사용: credentials clear [--url <RP>] — 캐시된 위임 VC 삭제");
+    if (args.sub === "import") {
+      const url = args.url?.replace(/\/+$/, "");
+      if (!url || !args.arg2) return fail("사용: credentials import --url <RP> <VC 파일> — /1 RP 의 위임 VC 저장");
+      const vc = readFileSync(args.arg2, "utf8").trim();
+      if (!/^[\w-]+\.[\w-]+\.[\w-]+~/.test(vc)) return fail(`SD-JWT VC 가 아닙니다: ${args.arg2}`);
+      const store = openAgentStore(args);
+      const { data } = await keyFrom(store);
+      data.credentials = { ...(data.credentials ?? {}), [url]: vc };
+      store.save(data);
+      console.log(`✅ 위임 VC 저장: ${url} — 데몬 재시작 후 사용`);
+      return 0;
+    }
+    if (args.sub === "unhold") {
+      const url = args.url?.replace(/\/+$/, "");
+      if (!url) return fail("사용: credentials unhold --url <RP> — 보류한 위임을 다시 제시(RP 갱신 후)");
+      const store = openAgentStore(args);
+      const data = store.load();
+      if (!data?.held?.[url]) {
+        console.log(`보류 없음: ${url}`);
+        return 0;
+      }
+      const { [url]: _gone, ...rest } = data.held;
+      data.held = rest;
+      store.save(data);
+      console.log(`✅ 보류 해제: ${url} — 데몬 재시작 후 다시 제시합니다`);
+      return 0;
+    }
+    if (args.sub !== "clear") return fail("사용: credentials clear|import|unhold [--url <RP>]");
     const store = openAgentStore(args);
     const data = store.load();
     if (!data?.credentials || Object.keys(data.credentials).length === 0) {
@@ -786,15 +912,28 @@ export async function main(argv: string[]): Promise<number> {
     //    재등록하는 경로가 바로 이것이다(register 명령과 같은 규칙). 종전에는 로컬 플래그만 보고
     //    **code 를 무시한 채 ✅ 를 찍어서**, 사용자는 재등록했다고 믿지만 데몬은 여전히 401 을 돌렸다
     //    (metapass-saas 실측 · briefick#18). 「성공처럼 보이는 실패」의 CLI 판이다.
-    if (!data.registrations?.[url] || args.code) {
+    if (args.verifier) {
+      // §7 pairing (proof, no code body) isn't built here yet; a /1 RP pairs the agent DID on its side for now.
+    } else if (!data.registrations?.[url] || args.code) {
       if (!args.code) return fail("--code 필요(최초 페어링) — RP의 에이전트 등록 화면에서 발급");
       const client = agentClient(url, key);
       await client.register(args.code, registerLabel(args));
       data.registrations = { ...(data.registrations ?? {}), [url]: true };
       store.save(data);
     }
-    if (!cfg.rps.some((r) => r.alias === alias)) {
-      cfg.rps.push({ alias, url, ...(args.mcpPath ? { mcpPath: args.mcpPath } : {}) } satisfies DaemonRp);
+    const v1 = args.verifier
+      ? { verifierUrl: args.verifier.replace(/\/+$/, ""), verifierRp: args.verifierRp ?? alias }
+      : {};
+    const existing = cfg.rps.find((r) => r.alias === alias);
+    if (!existing) {
+      cfg.rps.push({ alias, url, ...(args.mcpPath ? { mcpPath: args.mcpPath } : {}), ...v1 } satisfies DaemonRp);
+      saveConfig(dir, cfg);
+    } else if (args.verifier) {
+      // Converting a v0 RP stops its pairing-based connect loop; never do that by accident (Briefick).
+      if (!existing.verifierUrl && !args.force) {
+        return fail(`'${alias}' 는 v0 RP 입니다 — /1 로 바꾸려면 --force (되돌리기: remove ${alias} 후 add --code)`);
+      }
+      Object.assign(existing, v1);
       saveConfig(dir, cfg);
     }
     const token = ensureToken(dir);
@@ -868,6 +1007,8 @@ export async function main(argv: string[]): Promise<number> {
             : (leftMs < 24 * 3600_000 ? "⚠ 위임 만료 임박 " : "✓ 위임 유효 ") + `(${formatLeft(leftMs)} 남음)`;
         }
       }
+      const held = data?.held?.[rp.url];
+      if (cred && held?.credential === cred) deleg = `⏸ ${heldMessage(held)}`;
       console.log(`  ${rp.alias.padEnd(10)} ${deleg}`);
       const sess = sessionLine(sessions?.find((t) => t.alias === rp.alias));
       if (sess) console.log(`  ${"".padEnd(10)} ${sess}`);
@@ -960,7 +1101,6 @@ export async function main(argv: string[]): Promise<number> {
 
     const targets: DaemonTarget[] = [];
     for (const rp of cfg.rps) {
-      const client = agentClient(rp.url, key);
       const target: DaemonTarget = {
         alias: rp.alias,
         targetMcpUrl: mcpUrlFor(rp.url, rp.mcpPath),
@@ -968,6 +1108,14 @@ export async function main(argv: string[]): Promise<number> {
         pendingReason: "위임 미확보 — 지갑에서 승인하면 자동 연결됩니다",
       };
       targets.push(target);
+      if (rp.verifierUrl) {
+        connectV1Target(target, data, { ...rp, verifierUrl: rp.verifierUrl }, store, key).catch((e: unknown) => {
+          target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
+          console.error(`[${rp.alias}] ${target.pendingReason}`);
+        });
+        continue;
+      }
+      const client = agentClient(rp.url, key);
       void connectTarget(target, client, data, rp, store, key);
       void watchForNewerDelegation(target, client, data, rp, store, key);
     }

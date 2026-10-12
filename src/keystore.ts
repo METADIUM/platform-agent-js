@@ -22,6 +22,15 @@ export interface KeyStore {
   registrations?: Record<string, boolean>;
   /** URL별 회수한 위임 VC(SD-JWT VC) — 프록시/세션 재기동 시 재회수 방지. */
   credentials?: Record<string, string>;
+  /** URL별, an RP refused this VC with §11.1 `keep`: not presented again while it is the stored one. */
+  held?: Record<string, HeldCredential>;
+}
+
+export interface HeldCredential {
+  credential: string;
+  reason: string;
+  keys: string[];
+  keysTotal?: number;
 }
 
 /** 기본 키 파일 경로. `METAPASS_AGENT_KEY_FILE` 우선. */
