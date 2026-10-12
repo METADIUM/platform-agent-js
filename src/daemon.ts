@@ -17,6 +17,7 @@ import { timingSafeEqual } from "node:crypto";
 import { URL } from "node:url";
 import type { BearerSource } from "./proxy.js";
 import { isCallAuth, SessionUnavailable, type CallAuth } from "./delegation-session.js";
+import { constraintRefusalAction } from "./constraint-refusal.js";
 
 export interface DaemonTarget {
   alias: string;
@@ -50,6 +51,20 @@ export interface RunningDaemon {
 
 const HOP_BY_HOP = new Set(["host", "connection", "authorization", "keep-alive", "proxy-authorization"]);
 const MAX_BODY = 2 * 1024 * 1024; // MCP 요청은 JSON — 감사(메서드 추출)를 위해 버퍼링
+/** A §10 refusal body is small JSON; past this it's passed through without being read. */
+const MAX_REFUSAL_BODY = 64 * 1024;
+
+/** `{ "error": "constraint_denied", "reason": "<code>", "keys"?: [...] }` (§10), or null. */
+export function constraintDenial(raw: Buffer): { reason: string; keys: string[]; keysTotal?: number } | null {
+  try {
+    const b = JSON.parse(raw.toString("utf8")) as { error?: unknown; reason?: unknown; keys?: unknown; keysTotal?: unknown };
+    if (b?.error !== "constraint_denied" || typeof b.reason !== "string") return null;
+    const keys = Array.isArray(b.keys) ? b.keys.filter((k): k is string => typeof k === "string") : [];
+    return { reason: b.reason, keys, keysTotal: typeof b.keysTotal === "number" ? b.keysTotal : undefined };
+  } catch {
+    return null;
+  }
+}
 
 function tokenOk(expected: string, header: string | undefined): boolean {
   if (!header?.startsWith("Bearer ")) return false;
@@ -157,7 +172,8 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
       const port = candidates[idx];
       // 바인드 전 프로브 — macOS에서 기존 리스너가 있어도 listen이 성공으로 보고되고
       // 연결은 기존 프로세스로 가는 함정이 있어(EADDRINUSE 미발생) 실제 연결로 점유를 확인한다.
-      if (await portInUse(host, port)) {
+      // Port 0 asks the OS for a free port, so there's nothing to probe (tests running files in parallel use it).
+      if (port !== 0 && await portInUse(host, port)) {
         if (opts.port !== undefined) return reject(new Error(`포트 사용 중: ${host}:${port}`));
         idx++;
         return void tryListen();
@@ -168,12 +184,14 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
       });
       server.listen(port, host, () => {
         server.removeAllListeners("error");
+        const addr = server.address();
+        const bound = addr && typeof addr === "object" ? addr.port : port;   // the OS's choice when port is 0
         const single = opts.targets.length === 1;
         const urls: Record<string, string> = {};
         for (const t of opts.targets) {
-          urls[t.alias] = `http://${host}:${port}${single ? "/mcp" : `/${t.alias}/mcp`}`;
+          urls[t.alias] = `http://${host}:${bound}${single ? "/mcp" : `/${t.alias}/mcp`}`;
         }
-        resolve({ port, urls, close: () => new Promise<void>((r) => server.close(() => r())) });
+        resolve({ port: bound, urls, close: () => new Promise<void>((r) => server.close(() => r())) });
       });
     };
     void tryListen();
@@ -215,6 +233,8 @@ async function forward(
   headers["content-length"] = String(body.length);
   const auth = target.auth!;
   if (isCallAuth(auth)) {
+    // An encoded 403 couldn't be read for its §10 reason, so ask /1 RPs for an identity body (metapass-saas).
+    delete headers["accept-encoding"];
     try {
       // §11: htu is the public URL the agent called, without the query.
       Object.assign(headers, await auth.callHeaders(creq.method ?? "GET", url.origin + url.pathname + restPath, body));
@@ -247,6 +267,35 @@ async function forward(
         pres.resume();
         auth.setClockOffset(Math.round((date - Date.now()) / 1000));
         void forward(target, restPath, creq, cres, body, true);
+        return;
+      }
+      // §10: a 403 constraint_denied names its §11.1 reason; act on it, and pass the answer through unchanged.
+      // Every chunk is forwarded as it arrives; only the first MAX_REFUSAL_BODY bytes are kept for reading
+      // (Briefick: buffering then writing truncated a larger body under its original content-length).
+      if (isCallAuth(auth) && pres.statusCode === 403) {
+        // Chunked, not the RP's content-length: the client must not see the response complete before the refusal
+        // below is applied, or its next call presents the refused VC (metapass-saas: a load-dependent failure).
+        const headers = { ...pres.headers };
+        delete headers["content-length"];
+        cres.writeHead(403, headers);
+        const chunks: Buffer[] = [];
+        let size = 0;
+        pres.on("data", (c: Buffer) => {
+          cres.write(c);
+          size += c.length;
+          if (size <= MAX_REFUSAL_BODY) chunks.push(c);
+        });
+        // A reset upstream after the headers went out: end the client's response rather than leave it hanging.
+        pres.on("aborted", () => cres.destroy());
+        pres.on("error", () => cres.destroy());
+        pres.on("end", () => {
+          const refusal = size <= MAX_REFUSAL_BODY ? constraintDenial(Buffer.concat(chunks)) : null;
+          if (refusal) {
+            const action = constraintRefusalAction([refusal.reason]);
+            if (action) auth.refused?.(action, refusal.reason, refusal.keys, refusal.keysTotal);
+          }
+          cres.end();   // only after the refusal is applied
+        });
         return;
       }
       cres.writeHead(pres.statusCode ?? 502, pres.headers);

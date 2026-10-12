@@ -120,6 +120,14 @@ describe("daemon", () => {
     expect((await call("/ok/mcp", TOKEN, { method: "x" })).body).toEqual({ from: "ok" });
   });
 
+  it("port 0 binds a free port and reports it", async () => {
+    const up = await upstream();
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: auth("A") }], token: TOKEN, port: 0 });
+    expect(daemon.port, "port 0 was reported instead of the bound port").toBeGreaterThan(0);
+    expect(daemon.urls.a).toBe(`http://127.0.0.1:${daemon.port}/mcp`);
+    expect((await fetch(`http://127.0.0.1:${daemon.port}/healthz`)).status).toBe(200);
+  });
+
   it("포트 자동 배정 — 점유 시 다음 포트로", async () => {
     const up = await upstream("a");
     closers.push(up.close);

@@ -3,6 +3,7 @@
  * request proof on every forwarded call. The daemon uses it for a target whose RP serves `/1`; v0 targets keep their
  * bearer.
  */
+import type { ConstraintRefusalAction } from "./constraint-refusal.js";
 import type { AgentKey } from "./key.js";
 import type { SessionExchangeError, SessionToken } from "./session.js";
 
@@ -12,6 +13,8 @@ export interface CallAuth {
   /** §11 `use_fresh_time`: the RP's clock minus ours, in seconds. */
   setClockOffset(seconds: number): void;
   state(): SessionState;
+  /** The RP refused a call for the delegation's constraints (§10 `constraint_denied`, §11.1 `drop`/`keep`). */
+  refused?(action: ConstraintRefusalAction, reason: string, keys: string[], keysTotal?: number): void;
 }
 
 export type SessionState =
@@ -20,12 +23,14 @@ export type SessionState =
   /** The token is capped at the delegation's end and can't be refreshed further: a new delegation is needed. */
   | { status: "ending"; expiresAt: string }
   | { status: "retrying"; expiresAt?: string; lastError: string }
-  | { status: "dropped"; error: string };
+  | { status: "dropped"; error: string }
+  /** §11.1 `keep`: the RP doesn't understand a limit. The VC stays; this process stops presenting it. */
+  | { status: "held"; reason: string; keys: string[]; keysTotal?: number };
 
 /** No usable token: the daemon answers the MCP client locally (§9.1). */
 export class SessionUnavailable extends Error {
   constructor(
-    readonly error: "verifier_unreachable" | "delegation_dropped" | "delegation_ended" | "session_starting",
+    readonly error: "verifier_unreachable" | "delegation_dropped" | "delegation_ended" | "delegation_held" | "session_starting",
     message: string,
   ) {
     super(message);
@@ -85,10 +90,26 @@ export class DelegationSessionAuth implements CallAuth {
     this.offset = seconds;
   }
 
+  /** §11.1: `drop` makes the VC unusable, as `invalid_delegation` does; `keep` holds it unpresented. Both stop refreshing. */
+  refused(action: ConstraintRefusalAction, reason: string, keys: string[], keysTotal?: number): void {
+    this.stop();
+    this.current = action === "drop"
+      ? { status: "dropped", error: `constraint_denied: ${reason}` }
+      : { status: "held", reason, keys, ...(keysTotal !== undefined ? { keysTotal } : {}) };
+  }
+
   async callHeaders(method: string, htu: string, body: Uint8Array): Promise<Record<string, string>> {
     const t = this.token;
     if (this.current.status === "dropped") {
       throw new SessionUnavailable("delegation_dropped", `the delegation was refused: ${this.current.error}`);
+    }
+    if (this.current.status === "held") {
+      const { reason, keys, keysTotal } = this.current;
+      // §10: keys is capped at 16; keysTotal says how many there were.
+      const more = keysTotal !== undefined && keysTotal > keys.length ? ` and ${keysTotal - keys.length} more` : "";
+      throw new SessionUnavailable("delegation_held",
+        `the RP doesn't understand this delegation's constraints (${reason}${keys.length ? ": " + keys.join(",") + more : ""}); ` +
+        "the delegation is kept and not presented again until the RP is updated or a new one is approved");
     }
     // Never past exp, and never extended here (§9.1).
     if (t && this.current.status === "ending" && this.now() >= t.expiresAt.getTime()) {
@@ -113,6 +134,8 @@ export class DelegationSessionAuth implements CallAuth {
     if (this.stopped) return;
     try {
       const t = await this.o.exchange();
+      // Stopped while the exchange was in flight (a §11.1 refusal): don't bring the session back (metapass-saas).
+      if (this.stopped) return;
       const previous = this.token;
       this.token = t;
       this.backoff = 1_000;
@@ -126,6 +149,7 @@ export class DelegationSessionAuth implements CallAuth {
       const remaining = t.expiresAt.getTime() - this.now();
       this.next(remaining > REFRESH_AHEAD_MS ? remaining - REFRESH_AHEAD_MS : Math.max(1_000, remaining / 2));
     } catch (e) {
+      if (this.stopped) return;
       const err = e as Partial<SessionExchangeError>;
       if (err.dropVc) {
         this.current = { status: "dropped", error: String(err.message ?? e) };
