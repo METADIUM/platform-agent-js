@@ -174,13 +174,34 @@ describe("pickup follow-ups (minipaas, Briefick, metapass-saas on #48/#49)", () 
     expect(await pickup({ url, key })).toEqual({ ok: false, error: "no_pickup" });
     const { s } = await store();
     let calls = 0;
+    let sleeps = 0;
     const target: DaemonTarget = { alias: "b", targetMcpUrl: url + "/api/mcp", auth: null };
     const auth = await connectV1Target(target, s.load()!, { alias: "b", url, verifierUrl: url }, s, key, {
       pickup: async () => { calls++; return pickup({ url, key }); },
-      sleep: async () => { throw new Error("it kept polling after a 404"); },
+      sleep: async () => { if (++sleeps > 1) throw new Error("it kept polling after two 404s"); },
     });
     expect(auth).toBeNull();
-    expect(calls).toBe(1);
+    expect(calls, "it gave up on one 404 (a deploy can produce one) or polled past two").toBe(2);
     expect(target.pendingReason).toContain("credentials import");
   });
+});
+
+it("one 404 between answers doesn't park pickup (Briefick, #51)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "mpa-pick3-"));
+  closers.push(() => rmSync(d, { recursive: true, force: true }));
+  const s = openStore({ backend: "file", keyFile: join(d, "key.json") });
+  const key = await AgentKey.generate();
+  s.save({ privateJwk: key.exportPrivateJwk() });
+  const answers: PickupResult[] = [
+    { ok: false, error: "no_pickup" },
+    { ok: false, error: "authorization_pending" },
+    { ok: false, error: "no_pickup" },
+    { ok: true, delegations: [{ delegationId: "d", credential: vc("after-404s"), scope: [], exp: 1 }] },
+  ];
+  const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
+  const auth = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
+    pickup: async () => answers.shift()!, sleep: async () => {},
+  });
+  closers.push(() => auth?.stop());
+  expect(s.load()!.credentials?.["https://rp"], "two non-consecutive 404s parked pickup").toBe(vc("after-404s"));
 });

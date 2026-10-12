@@ -582,10 +582,12 @@ export function vcDigest(vc: string): string {
  */
 async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, store: AgentStore, deps: Required<V1Deps>): Promise<string | null> {
   let interval = DEFAULT_POLL_INTERVAL_S;
+  let notFound = 0;
   for (;;) {
     let reason: string;
     try {
       const r = await deps.pickup();
+      if (r.ok || r.error !== "no_pickup") notFound = 0;
       if (r.ok) {
         // Persisted, so a restart doesn't re-adopt a VC this agent already saw refused (minipaas, Briefick).
         const dropped = new Set((store.load() ?? data).dropped?.[rp.url] ?? []);
@@ -599,10 +601,13 @@ async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, st
           return d.credential;
         }
         reason = "위임 대기 — 지갑에서 승인하면 자동으로 받습니다";
-      } else if (r.error === "no_pickup") {
+      } else if (r.error === "no_pickup" && ++notFound >= 2) {
+        // Two in a row, an interval apart: one 404 can be a deploy in progress (Briefick).
         target.pendingReason = `이 RP는 §8 회수를 지원하지 않습니다 — credentials import --url ${rp.url} <파일>`;
         console.error(`[${rp.alias}] ${target.pendingReason}`);
         return null;
+      } else if (r.error === "no_pickup") {
+        reason = `회수 경로가 없습니다(404) — ${interval}초 후 한 번 더 확인합니다`;
       } else {
         if (r.interval) interval = Math.max(interval, r.interval);
         reason = pickupMessage(r, rp.url);
