@@ -29,3 +29,22 @@ describe("making a freshly installed binary the running process (Linux)", () => 
     expect(flat().some((c) => c.startsWith("--user enable "))).toBe(true);
   });
 });
+
+describe("a key store that can't be read stops the service instead of looping (metapass-saas, #47)", async () => {
+  const { EXIT_CONFIG, systemdUnit } = await import("../src/install.js");
+  const { exitCodeFor } = await import("../src/cli.js");
+  const { KeyStoreUnreadable } = await import("../src/keystore.js");
+
+  it("the CLI exits with the code the unit doesn't restart on", () => {
+    const code = exitCodeFor(new KeyStoreUnreadable("x"));
+    expect(code).not.toBe(1);
+    expect(systemdUnit(["/bin/agent", "up"]), "the unit restarts on the unreadable-store exit")
+      .toContain(`RestartPreventExitStatus=${code}`);
+    expect(code).toBe(EXIT_CONFIG);
+  });
+
+  it("other failures still exit 1, which the unit restarts on", () => {
+    expect(exitCodeFor(new Error("network"))).toBe(1);
+    expect(systemdUnit(["/bin/agent", "up"])).toContain("Restart=on-failure");
+  });
+});

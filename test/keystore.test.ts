@@ -181,3 +181,26 @@ describe("a keychain that can't be read is not «no key» (metapass-saas, #47)",
     expect(() => loadKeychainStore({ exec: exit(1, "Cannot autolaunch D-Bus"), platform: "linux" })).toThrow(/새 키를 만들지 않습니다/);
   });
 });
+
+describe("keychain migration from an unreadable key.json (metapass-saas, #47)", () => {
+  it("throws and writes nothing to the keychain", async () => {
+    const { migrateLegacyKeyFile } = await import("../src/cli.js");
+    const file = tmp();
+    writeFileSync(file, '{"privateJwk":', { mode: 0o600 });
+    let saved = false;
+    const keychain = { backend: "keychain" as const, location: "kc", load: () => null, save: () => { saved = true; } };
+    expect(() => migrateLegacyKeyFile(keychain, file)).toThrow(/새 키를 만들지 않습니다/);
+    expect(saved, "an unreadable key.json was migrated").toBe(false);
+  });
+
+  it("a readable key.json is migrated once", async () => {
+    const { migrateLegacyKeyFile } = await import("../src/cli.js");
+    const file = tmp();
+    const key = await AgentKey.generate();
+    saveStore(file, { privateJwk: key.exportPrivateJwk() });
+    let saved: KeyStore | undefined;
+    const keychain = { backend: "keychain" as const, location: "kc", load: () => saved ?? null, save: (s: KeyStore) => { saved = s; } };
+    migrateLegacyKeyFile(keychain, file);
+    expect(saved?.privateJwk).toEqual(key.exportPrivateJwk());
+  });
+});
