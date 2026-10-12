@@ -21,6 +21,7 @@ import { AgentClientError, BriefickAgentClient, isRequestExpired, DEFAULT_SERVIC
 import { AgentAuth } from "./agent.js";
 import { DelegationSessionAuth, type SessionState } from "./delegation-session.js";
 import { exchangeSessionToken } from "./session.js";
+import { DEFAULT_POLL_INTERVAL_S, latest, pickup, pickupMessage, type PickupResult } from "./pickup.js";
 import { constraintRefusalAction } from "./constraint-refusal.js";
 import { startProxy, type BearerSource } from "./proxy.js";
 import { defaultKeyFile, loadStore, openStore, type AgentStore, type KeyStore } from "./keystore.js";
@@ -536,17 +537,65 @@ export async function connectTarget(
 
 
 /** The `/1` target (spec §9–§11): exchange the stored VC at the verifier, and sign each call. */
+export interface V1Deps {
+  /** §8 pickup; when absent, a missing VC waits for `credentials import`. */
+  pickup?: () => Promise<PickupResult>;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** VCs an RP refused with §11.1 `drop`, per RP: pickup is repeatable and would hand them back (in memory only). */
+const droppedVcs = new Map<string, Set<string>>();
+
+/** §8: poll pickup at the RP's interval until a live delegation arrives, store it, and return it. */
+async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, store: AgentStore, deps: Required<V1Deps>): Promise<string> {
+  let interval = DEFAULT_POLL_INTERVAL_S;
+  for (;;) {
+    let reason: string;
+    try {
+      const r = await deps.pickup();
+      if (r.ok) {
+        const dropped = droppedVcs.get(rp.url);
+        const d = latest(r.delegations.filter((x) => !dropped?.has(x.credential)));
+        if (d) {
+          const fresh = store.load() ?? data;
+          fresh.credentials = { ...(fresh.credentials ?? {}), [rp.url]: d.credential };
+          store.save(fresh);
+          data.credentials = fresh.credentials;
+          console.error(`[${rp.alias}] 위임 수령(${d.delegationId})`);
+          return d.credential;
+        }
+        reason = "위임 대기 — 지갑에서 승인하면 자동으로 받습니다";
+      } else {
+        if (r.interval) interval = Math.max(interval, r.interval);
+        reason = pickupMessage(r, rp.url);
+      }
+    } catch (e) {
+      reason = `회수 실패 — ${interval}초 후 재시도: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    if (reason !== target.pendingReason) console.error(`[${rp.alias}] ${reason}`);
+    target.pendingReason = reason;
+    await deps.sleep(interval * 1000);
+  }
+}
+
 export async function connectV1Target(
   target: DaemonTarget,
   data: KeyStore,
   rp: DaemonRp & { verifierUrl: string },
   store: AgentStore,
   key: AgentKey,
+  deps: V1Deps = {},
 ): Promise<DelegationSessionAuth | null> {
-  const credential = data.credentials?.[rp.url];
+  let credential = data.credentials?.[rp.url];
   if (!credential) {
-    target.pendingReason = `위임 VC 없음 — credentials import --url ${rp.url} <파일>`;
-    return null;
+    if (!deps.pickup) {
+      target.pendingReason = `위임 VC 없음 — credentials import --url ${rp.url} <파일>`;
+      return null;
+    }
+    credential = await waitPickup(target, data, rp, store, {
+      pickup: deps.pickup,
+      sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+    });
   }
   const held = data.held?.[rp.url];
   if (held?.credential === credential) {
@@ -562,6 +611,7 @@ export async function connectV1Target(
     if (s.status === "dropped") {
       const { [rp.url]: _gone, ...rest } = fresh.credentials;
       fresh.credentials = rest;
+      droppedVcs.set(rp.url, (droppedVcs.get(rp.url) ?? new Set()).add(vc));
       console.error(`[${rp.alias}] 위임 폐기(${s.error}) — 저장된 VC 삭제, 새 위임 필요`);
     } else {
       const { status: _s, ...h } = s;
@@ -583,6 +633,13 @@ export async function connectV1Target(
       } catch (e) {
         // Thrown from the session's callback, this would end the daemon (Briefick).
         console.error(`[${rp.alias}] 위임 상태 저장 실패: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      // A dropped VC is gone: wait for a new delegation by pickup, as on a first start.
+      if (s.status === "dropped" && deps.pickup && target.auth === auth) {
+        target.auth = null;
+        void connectV1Target(target, data, rp, store, key, deps).catch((e: unknown) => {
+          target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
+        });
       }
     },
   });
@@ -621,7 +678,8 @@ export const helpText = (inv: string = invocation()): string => `metapass-agent 
 데몬
   add <RP_URL> --code <코드>        RP를 페어링하고 데몬에 추가합니다. Claude Code 등록 명령을 출력합니다.
                                     [--alias 이름] [--label 표시 이름]
-  add <RP_URL> --verifier <URL>     /1 RP를 추가합니다(페어링 코드 없이). [--verifier-rp 등록부 별칭]
+  add <RP_URL> --verifier <URL>     /1 RP를 추가합니다. --code를 주면 페어링도 합니다. [--verifier-rp 등록부 별칭]
+                                    위임은 데몬이 RP에서 자동으로 받습니다(§8 회수).
   up [--install]                    등록된 모든 RP를 127.0.0.1:<포트>/<alias>/mcp로 제공합니다.
                                     로컬 토큰이 필요합니다(GET /healthz만 예외).
                                     --install: OS 서비스(launchd, systemd --user)로 설치하고 시작합니다.
@@ -632,7 +690,7 @@ export const helpText = (inv: string = invocation()): string => `metapass-agent 
 
 위임 VC
   credentials clear [--url <RP>]        저장된 위임 VC를 지웁니다. 다음 실행 때 지갑 승인을 기다립니다.
-  credentials import --url <RP> <파일>  /1 RP의 위임 VC를 파일에서 저장합니다.
+  credentials import --url <RP> <파일>  /1 RP의 위임 VC를 파일에서 저장합니다(§8 회수가 없는 RP용).
   credentials unhold --url <RP>         보류된 위임을 다시 씁니다(RP가 갱신된 뒤).
 
 RP 하나만 다룰 때
@@ -904,8 +962,8 @@ export async function main(argv: string[]): Promise<number> {
     //    재등록하는 경로가 바로 이것이다(register 명령과 같은 규칙). 종전에는 로컬 플래그만 보고
     //    **code 를 무시한 채 ✅ 를 찍어서**, 사용자는 재등록했다고 믿지만 데몬은 여전히 401 을 돌렸다
     //    (metapass-saas 실측 · briefick#18). 「성공처럼 보이는 실패」의 CLI 판이다.
-    if (args.verifier) {
-      // §7 pairing (proof, no code body) isn't built here yet; a /1 RP pairs the agent DID on its side for now.
+    if (args.verifier && !args.code) {
+      // A /1 RP may pair the agent another way; pickup answers `unknown_agent` until it does.
     } else if (!data.registrations?.[url] || args.code) {
       if (!args.code) return fail("--code 필요(최초 페어링) — RP의 에이전트 등록 화면에서 발급");
       const client = agentClient(url, key);
@@ -1101,7 +1159,10 @@ export async function main(argv: string[]): Promise<number> {
       };
       targets.push(target);
       if (rp.verifierUrl) {
-        connectV1Target(target, data, { ...rp, verifierUrl: rp.verifierUrl }, store, key).catch((e: unknown) => {
+        const pickupDeps: V1Deps = {
+          pickup: () => pickup({ url: rp.url, key, version: packageVersion() ?? undefined }),
+        };
+        connectV1Target(target, data, { ...rp, verifierUrl: rp.verifierUrl }, store, key, pickupDeps).catch((e: unknown) => {
           target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
           console.error(`[${rp.alias}] ${target.pendingReason}`);
         });
