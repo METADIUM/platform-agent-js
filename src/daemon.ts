@@ -289,12 +289,18 @@ async function forward(
         pres.on("aborted", () => cres.destroy());
         pres.on("error", () => cres.destroy());
         pres.on("end", () => {
-          const refusal = size <= MAX_REFUSAL_BODY ? constraintDenial(Buffer.concat(chunks)) : null;
-          if (refusal) {
-            const action = constraintRefusalAction([refusal.reason]);
-            if (action) auth.refused?.(action, refusal.reason, refusal.keys, refusal.keysTotal);
+          try {
+            const refusal = size <= MAX_REFUSAL_BODY ? constraintDenial(Buffer.concat(chunks)) : null;
+            if (refusal) {
+              const action = constraintRefusalAction([refusal.reason]);
+              if (action) auth.refused?.(action, refusal.reason, refusal.keys, refusal.keysTotal);
+            }
+          } catch (e) {
+            // Thrown from an event handler, this would end the daemon (Briefick).
+            console.error(`[${target.alias}] applying a constraint refusal failed:`, e);
+          } finally {
+            cres.end();   // only after the refusal is applied
           }
-          cres.end();   // only after the refusal is applied
         });
         return;
       }

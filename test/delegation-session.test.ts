@@ -254,6 +254,17 @@ describe("daemon with a /1 target", () => {
       expect(up.seen.length, "a dropped delegation was presented again").toBe(1);
     });
 
+  it("still ends the client's response, and keeps serving, when applying a refusal throws", async () => {
+    const up = await rp(() => denied("constraints_missing"));
+    const s = await session();
+    s.refused = () => { throw new Error("boom"); };
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t", port: 0 });
+    const first = await post("/mcp");
+    expect(first.status).toBe(403);
+    expect(first.body, "the refusal didn't reach the client whole").toMatchObject({ error: "constraint_denied" });
+    expect((await post("/mcp")).status, "the daemon stopped serving after the throw").toBe(403);
+  });
+
   /** §11.1 keep: the RP lags the vct version; the VC stays, but isn't presented again, and the keys are named. */
   it("holds the delegation on constraints_unknown_key and names the keys", async () => {
     const up = await rp(() => denied("constraints_unknown_key", ["maxAmount"]));
