@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, statSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, statSync, chmodSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { AgentKey } from "../src/key.js";
@@ -129,5 +129,55 @@ describe("keychain 백엔드", () => {
     const s = openStore({ keyFile: tmp() });
     expect(s.backend).toBe("file");
     expect(s.load()).toBeNull();
+  });
+});
+
+/** A store that exists but can't be read must never be answered with a new key (that replaces the agent's identity). */
+describe("an unreadable key store is refused, never regenerated (metapass-saas F3, #44)", () => {
+  const broken: [string, string][] = [
+    ["a half-written file", '{"privateJwk":{"kty":"EC","crv":"P-256","x":"ab'],
+    ["an empty file", ""],
+    ["JSON without a key", '{"credentials":{}}'],
+  ];
+
+  it.each(broken)("file backend: %s — `did` fails and the file is left as it was", async (_name, content) => {
+    const file = tmp();
+    writeFileSync(file, content, { mode: 0o600 });
+    const { main } = await import("../src/cli.js");
+    await expect(main(["did", "--key-file", file])).rejects.toThrow(/새 키를 만들지 않습니다/);
+    expect(readFileSync(file, "utf8"), "the unreadable file was overwritten").toBe(content);
+  });
+
+  it("keychain backend: an unparsable item is refused, not read as «no key»", () => {
+    const exec: ExecFn = () => ({ status: 0, stdout: "not json", stderr: "" });
+    expect(() => loadKeychainStore({ exec, platform: "darwin" })).toThrow(/새 키를 만들지 않습니다/);
+  });
+
+  it("a missing store is still «no key yet»", () => {
+    expect(loadStore(tmp())).toBeNull();
+  });
+
+  it("save replaces the file whole and leaves no temp file behind", async () => {
+    const file = tmp();
+    const key = await AgentKey.generate();
+    saveStore(file, { privateJwk: key.exportPrivateJwk() });
+    saveStore(file, { privateJwk: key.exportPrivateJwk(), credentials: { a: "b" } });
+    expect(loadStore(file)?.credentials).toEqual({ a: "b" });
+    expect(readdirSync(join(file, "..")), "a temp file was left beside the key").toEqual(["key.json"]);
+    if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("a keychain that can't be read is not «no key» (metapass-saas, #47)", () => {
+  const exit = (status: number, stderr = ""): ExecFn => () => ({ status, stdout: "", stderr });
+  it.each([36, 128, 51])("macOS: security exit %i throws", (status) => {
+    expect(() => loadKeychainStore({ exec: exit(status, "locked"), platform: "darwin" })).toThrow(/새 키를 만들지 않습니다/);
+  });
+  it("macOS: exit 44 (item not found) is «no key yet»", () => {
+    expect(loadKeychainStore({ exec: exit(44, "could not be found"), platform: "darwin" })).toBeNull();
+  });
+  it("Linux: secret-tool exit 1 with nothing on stderr is «no key yet»; with an error it throws", () => {
+    expect(loadKeychainStore({ exec: exit(1), platform: "linux" })).toBeNull();
+    expect(() => loadKeychainStore({ exec: exit(1, "Cannot autolaunch D-Bus"), platform: "linux" })).toThrow(/새 키를 만들지 않습니다/);
   });
 });

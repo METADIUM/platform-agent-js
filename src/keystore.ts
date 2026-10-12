@@ -11,7 +11,7 @@
  */
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import type { JWK } from "jose";
 
@@ -50,15 +50,31 @@ function assertOwnerOnly(file: string): void {
   }
 }
 
+/** A store that exists but can't be read. Never answered with a new key: that would replace the agent's identity. */
+export class KeyStoreUnreadable extends Error {}
+
+function parseStore(raw: string, where: string): KeyStore {
+  let s: unknown;
+  try {
+    s = JSON.parse(raw);
+  } catch {
+    throw unreadable(where, "JSON 이 아닙니다");
+  }
+  if (!s || typeof s !== "object" || !(s as KeyStore).privateJwk) throw unreadable(where, "privateJwk 가 없습니다");
+  return s as KeyStore;
+}
+
+function unreadable(where: string, why: string): KeyStoreUnreadable {
+  return new KeyStoreUnreadable(
+    `키 저장소를 읽을 수 없습니다(${where}): ${why}. 새 키를 만들지 않습니다 — 에이전트 신원과 위임이 사라집니다. ` +
+      "백업에서 복구하거나, 새 에이전트로 시작하려면 그 항목을 치운 뒤 다시 실행하세요",
+  );
+}
+
 export function loadStore(file: string): KeyStore | null {
   if (!existsSync(file)) return null;
   assertOwnerOnly(file);
-  try {
-    const s = JSON.parse(readFileSync(file, "utf8")) as KeyStore;
-    return s.privateJwk ? s : null;
-  } catch {
-    return null;
-  }
+  return parseStore(readFileSync(file, "utf8"), file);
 }
 
 export function saveStore(file: string, store: KeyStore): void {
@@ -67,11 +83,17 @@ export function saveStore(file: string, store: KeyStore): void {
   const dir = dirname(file);
   const isDefaultDir = dir === join(homedir(), ".metapass-agent");
   mkdirSync(dir, { recursive: true, mode: isDefaultDir ? 0o700 : undefined });
-  writeFileSync(file, JSON.stringify(store), { mode: 0o600 });
-  if (process.platform !== "win32") {
-    chmodSync(file, 0o600); // 덮어쓰기는 기존 모드를 유지하므로 항상 보정
-    if (isDefaultDir) chmodSync(dir, 0o700); // 구버전(0755)으로 만들어진 기본 디렉터리 보정
+  // Write beside it, then rename: a reader (or a crash) never sees a half-written key file.
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(store), { mode: 0o600 });
+    if (process.platform !== "win32") chmodSync(tmp, 0o600);
+    renameSync(tmp, file);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
   }
+  if (process.platform !== "win32" && isDefaultDir) chmodSync(dir, 0o700); // 구버전(0755)으로 만들어진 기본 디렉터리 보정
 }
 
 // ── OS 키체인 백엔드 (macOS security / Linux secret-tool) ──────────────────────
@@ -131,13 +153,13 @@ export function loadKeychainStore(opts: KeychainOptions = {}): KeyStore | null {
   if (r.status === null) {
     throw new Error(`키체인 도구(${cmd})를 찾을 수 없습니다 — file 백엔드를 사용하거나 도구를 설치하세요`);
   }
-  if (r.status !== 0 || !r.stdout.trim()) return null; // 미존재(macOS 44 / secret-tool 1)
-  try {
-    const s = JSON.parse(r.stdout.trim()) as KeyStore;
-    return s.privateJwk ? s : null;
-  } catch {
-    return null;
-  }
+  const platform = opts.platform ?? process.platform;
+  // Only "no such item" means no key yet: macOS 44 (errSecItemNotFound), secret-tool 1 with nothing on stderr.
+  // A locked or denied keychain (36, 128, …) must not read as "no key", or a new key would replace it (metapass-saas).
+  const notFound = platform === "darwin" ? r.status === 44 : r.status === 1 && !r.stderr.trim();
+  if (notFound) return null;
+  if (r.status !== 0) throw unreadable(`${cmd} exit ${r.status}`, r.stderr.trim() || "키체인 오류");
+  return parseStore(r.stdout.trim(), cmd);
 }
 
 export function saveKeychainStore(store: KeyStore, opts: KeychainOptions = {}): void {
