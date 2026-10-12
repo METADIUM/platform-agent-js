@@ -12,7 +12,7 @@ const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve();
 
 describe("the daemon's watch for a newer delegation", () => {
   let target: { auth: { bearer(): string } | null; pendingReason?: string };
-  let store: { save: ReturnType<typeof vi.fn> };
+  let store: { load: () => null; save: ReturnType<typeof vi.fn> };
   let data: { credentials?: Record<string, string> };
   let saved: string | undefined;
 
@@ -22,7 +22,7 @@ describe("the daemon's watch for a newer delegation", () => {
     // 🔴 Capture what was on `data` AT THE MOMENT of the save. Asserting «the credential is set»
     //    and «save was called» separately passes even if save runs first and writes the OLD value —
     //    measured: swapping those two lines left this file green until this snapshot was added.
-    store = { save: vi.fn((d: { credentials?: Record<string, string> }) => { saved = d.credentials?.["https://rp.example"]; }) };
+    store = { load: () => null, save: vi.fn((d: { credentials?: Record<string, string> }) => { saved = d.credentials?.["https://rp.example"]; }) };
     saved = undefined;
     data = { credentials: { "https://rp.example": "OLD" } };
   });
@@ -79,13 +79,13 @@ describe("the daemon's watch for a newer delegation", () => {
 
 describe("how the watch treats answers that are not a replacement", () => {
   let target: { auth: { bearer(): string } | null };
-  let store: { save: ReturnType<typeof vi.fn> };
+  let store: { load: () => null; save: ReturnType<typeof vi.fn> };
   let data: { credentials?: Record<string, string> };
 
   beforeEach(() => {
     vi.useFakeTimers();
     target = { auth: { bearer: () => "b" } };
-    store = { save: vi.fn() };
+    store = { load: () => null, save: vi.fn() };
     data = { credentials: { "https://rp.example": "OLD" } };
   });
   afterEach(() => vi.useRealTimers());

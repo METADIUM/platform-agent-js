@@ -27,14 +27,14 @@ describe("constraintRefusalAction (spec §11.1)", () => {
 describe("the daemon on a session refused for its constraints", () => {
   const URL = "https://rp.example";
   let data: { credentials?: Record<string, string> };
-  let store: { save: ReturnType<typeof vi.fn> };
+  let store: { load: () => null; save: ReturnType<typeof vi.fn> };
   let target: { auth: unknown; pendingReason?: string };
 
   beforeEach(() => {
     vi.useFakeTimers();
     vi.spyOn(console, "error").mockImplementation(() => {});
     data = { credentials: { [URL]: "OLD" } };
-    store = { save: vi.fn() };
+    store = { load: () => null, save: vi.fn() };
     target = { auth: null };
   });
   afterEach(() => {
