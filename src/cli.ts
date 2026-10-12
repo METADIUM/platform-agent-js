@@ -25,7 +25,7 @@ import { exchangeSessionToken } from "./session.js";
 import { DEFAULT_POLL_INTERVAL_S, latest, pickup, pickupMessage, type PickupResult } from "./pickup.js";
 import { constraintRefusalAction } from "./constraint-refusal.js";
 import { startProxy, type BearerSource } from "./proxy.js";
-import { defaultKeyFile, loadStore, openStore, type AgentStore, type KeyStore } from "./keystore.js";
+import { defaultKeyFile, loadStore, openStore, type AgentStore, type DroppedVc, type KeyStore } from "./keystore.js";
 import {
   aliasFromUrl, configDir, ensureToken, loadConfig, mcpAddCommand, rotateToken, saveConfig,
   type DaemonConfig, type DaemonRp,
@@ -569,11 +569,37 @@ export interface V1Deps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** How many dropped-VC digests are kept per RP (oldest go first). */
-const DROPPED_KEPT = 20;
+/** The longest pickup interval honoured from an RP (s); anything above, non-finite or non-positive is ignored. */
+const MAX_POLL_INTERVAL_S = 3600;
 
 export function vcDigest(vc: string): string {
   return createHash("sha256").update(vc, "utf8").digest("base64url");
+}
+
+function vcExp(vc: string): number | null {
+  try {
+    const exp = (JSON.parse(Buffer.from(vc.split(".")[1] ?? "", "base64url").toString("utf8")) as { exp?: unknown }).exp;
+    return typeof exp === "number" && Number.isFinite(exp) ? exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Dropped VCs still live: an expired one can't come back from pickup anyway. */
+function liveDropped(list: KeyStore["dropped"], url: string, nowS: number): DroppedVc[] {
+  return (list?.[url] ?? []).filter((d) => d.exp === null || d.exp > nowS);
+}
+
+function isDropped(store: AgentStore, data: KeyStore, url: string, vc: string): boolean {
+  const digest = vcDigest(vc);
+  const nowS = Date.now() / 1000;
+  return [store.load() ?? data, data].some((s) => liveDropped(s.dropped, url, nowS).some((d) => d.digest === digest));
+}
+
+/** A pickup `interval` the RP sent, kept only when it is a sane number; never below the 60 s floor (§8). */
+function pollInterval(current: number, sent: unknown): number {
+  const s = typeof sent === "number" && Number.isFinite(sent) && sent > 0 ? Math.min(sent, MAX_POLL_INTERVAL_S) : 0;
+  return Math.max(DEFAULT_POLL_INTERVAL_S, current, s);
 }
 
 /**
@@ -590,8 +616,7 @@ async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, st
       if (r.ok || r.error !== "no_pickup") notFound = 0;
       if (r.ok) {
         // Persisted, so a restart doesn't re-adopt a VC this agent already saw refused (minipaas, Briefick).
-        const dropped = new Set((store.load() ?? data).dropped?.[rp.url] ?? []);
-        const d = latest(r.delegations.filter((x) => !dropped.has(vcDigest(x.credential))));
+        const d = latest(r.delegations.filter((x) => !isDropped(store, data, rp.url, x.credential)));
         if (d) {
           const fresh = store.load() ?? data;
           fresh.credentials = { ...(fresh.credentials ?? {}), [rp.url]: d.credential };
@@ -609,10 +634,11 @@ async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, st
       } else if (r.error === "no_pickup") {
         reason = `회수 경로가 없습니다(404) — ${interval}초 후 한 번 더 확인합니다`;
       } else {
-        if (r.interval) interval = Math.max(interval, r.interval);
+        interval = pollInterval(interval, r.interval);
         reason = pickupMessage(r, rp.url);
       }
     } catch (e) {
+      notFound = 0;   // "two in a row" means two answers in a row; an error between them breaks the run
       reason = `회수 실패 — ${interval}초 후 재시도: ${e instanceof Error ? e.message : String(e)}`;
     }
     if (reason !== target.pendingReason) console.error(`[${rp.alias}] ${reason}`);
@@ -630,6 +656,8 @@ export async function connectV1Target(
   deps: V1Deps = {},
 ): Promise<DelegationSessionAuth | null> {
   let credential = data.credentials?.[rp.url];
+  // A VC this agent already saw refused is never presented again, from memory or the store (metapass-saas B1).
+  if (credential && isDropped(store, data, rp.url, credential)) credential = undefined;
   if (!credential) {
     if (!deps.pickup) {
       target.pendingReason = `위임 VC 없음 — credentials import --url ${rp.url} <파일>`;
@@ -655,9 +683,15 @@ export async function connectV1Target(
     if (!fresh) return;
     if (s.status === "dropped") {
       // Remembered even when a newer VC is stored now: this one was refused, and pickup would hand it back.
-      const seen = (fresh.dropped?.[rp.url] ?? []).filter((d) => d !== vcDigest(vc));
-      fresh.dropped = { ...(fresh.dropped ?? {}), [rp.url]: [...seen, vcDigest(vc)].slice(-DROPPED_KEPT) };
+      const nowS = Date.now() / 1000;
+      const seen = liveDropped(fresh.dropped, rp.url, nowS).filter((d) => d.digest !== vcDigest(vc));
+      fresh.dropped = { ...(fresh.dropped ?? {}), [rp.url]: [...seen, { digest: vcDigest(vc), exp: vcExp(vc) }] };
       data.dropped = fresh.dropped;
+      // Out of memory too, whatever the store holds now: the reconnect below must not present it again (B1).
+      if (data.credentials?.[rp.url] === vc) {
+        const { [rp.url]: _mem, ...restMem } = data.credentials;
+        data.credentials = restMem;
+      }
     }
     if (fresh.credentials?.[rp.url] !== vc) {
       if (s.status === "dropped") store.save(fresh);
@@ -688,12 +722,16 @@ export async function connectV1Target(
         // Thrown from the session's callback, this would end the daemon (Briefick).
         console.error(`[${rp.alias}] 위임 상태 저장 실패: ${e instanceof Error ? e.message : String(e)}`);
       }
-      // A dropped VC is gone: wait for a new delegation by pickup, as on a first start.
+      // A dropped VC is gone: wait one interval, then look for a new delegation by pickup. The wait bounds any
+      // drop → reconnect cycle to one per interval, whatever caused the drop (metapass-saas B1).
       if (s.status === "dropped" && deps.pickup && target.auth === auth) {
         target.auth = null;
-        void connectV1Target(target, data, rp, store, key, deps).catch((e: unknown) => {
-          target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
-        });
+        const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+        void sleep(DEFAULT_POLL_INTERVAL_S * 1000)
+          .then(() => connectV1Target(target, data, rp, store, key, deps))
+          .catch((e: unknown) => {
+            target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
+          });
       }
     },
   });

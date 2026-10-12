@@ -24,8 +24,14 @@ export interface KeyStore {
   credentials?: Record<string, string>;
   /** URL별, an RP refused this VC with §11.1 `keep`: not presented again while it is the stored one. */
   held?: Record<string, HeldCredential>;
-  /** URL별, digests of VCs an RP refused with §11.1 `drop`; pickup is repeatable and would hand them back. */
-  dropped?: Record<string, string[]>;
+  /** URL별, VCs an RP refused with §11.1 `drop` (digest, and the VC's `exp` to forget it by); pickup would hand them back. */
+  dropped?: Record<string, DroppedVc[]>;
+}
+
+export interface DroppedVc {
+  digest: string;
+  /** The VC's `exp` (epoch s), or null when it has none; kept until then, so the list is bounded by live VCs. */
+  exp: number | null;
 }
 
 export interface HeldCredential {
