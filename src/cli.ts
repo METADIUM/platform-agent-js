@@ -611,67 +611,57 @@ export function invocation(sea: boolean = isSeaBinary(), execPath: string = proc
   return sea ? execPath : "npx @metadium-did/platform-agent-js";
 }
 
-export const helpText = (inv: string = invocation()): string => `platform-agent — AI 에이전트 위임 등록/세션/프록시 CLI
+export const helpText = (inv: string = invocation()): string => `metapass-agent — AI 에이전트 위임 CLI
 
-사용(데몬 — 권장, doc26):
-  ${inv} add <RP_URL> --code <PAIRING_CODE> [--alias 이름] [--label 표시이름]
-  ${inv} up                # 등록된 전 RP를 한 데몬으로(로컬 토큰 필수)
-  ${inv} status            # RP별 위임 유효·만료·데몬 상태
-  ${inv} remove <alias>
-  ${inv} rotate-token      # ⚠ 회전 = 전 RP MCP 재등록 필요
-  ${inv} up --install      # OS 데몬 설치+시작(launchd/systemd --user+linger)
-  ${inv} down --uninstall  # OS 데몬 중지·제거
-  ${inv} upgrade           # 최신 릴리스로 «판을 올린다» (서명 검증 후 교체) + 유닛 재시작
-  ${inv} upgrade --check   # 받지 않고 판만 비교
+시작하기
+  ${inv} add <RP_URL> --code <페어링 코드>
+  ${inv} up --install
+  ${inv} status
 
-사용(단일 RP·저수준):
-  ${inv} register --url <RP_URL> --code <PAIRING_CODE>
-  ${inv} proxy    --url <RP_URL> [--port 8787]
-  ${inv} did
-  ${inv} session  --url <RP_URL>
-  ${inv} credentials clear [--url <RP_URL>]
+데몬
+  add <RP_URL> --code <코드>        RP를 페어링하고 데몬에 추가합니다. Claude Code 등록 명령을 출력합니다.
+                                    [--alias 이름] [--label 표시 이름]
+  add <RP_URL> --verifier <URL>     /1 RP를 추가합니다(페어링 코드 없이). [--verifier-rp 등록부 별칭]
+  up [--install]                    등록된 모든 RP를 127.0.0.1:<포트>/<alias>/mcp로 제공합니다.
+                                    --install: OS 서비스(launchd, systemd --user)로 설치하고 시작합니다.
+  down --uninstall                  OS 서비스를 중지하고 제거합니다.
+  status                            데몬 상태, RP별 위임 상태, Claude Code 등록 명령을 보여 줍니다.
+  remove <alias>                    데몬 설정에서 RP를 뺍니다. 등록과 위임 VC는 남습니다.
+  rotate-token                      로컬 토큰을 바꿉니다. 모든 RP를 Claude Code에 다시 등록해야 합니다.
 
-명령:
-  add                RP 추가 — 페어링(register)+데몬 설정을 한 번에. 끝나면 claude mcp add 명령(로컬 토큰 포함) 출력
-  up                 등록된 모든 RP를 한 프로세스로 서빙: 127.0.0.1:<port>/<alias>/mcp (RP 1개면 /mcp 호환).
-                     로컬 인증 토큰 필수(GET /healthz만 무토큰 — 다운 vs 인증실패 구분용)
-  status             데몬 생사 + RP별 위임 유효/만료 임박(<24h ⚠) + MCP 등록 명령
-  remove             데몬 설정에서 RP 제거
-  rotate-token       로컬 토큰 회전 — 즉시 전 RP의 MCP 등록이 401, 출력된 명령으로 전부 재등록
-  register           페어링 코드로 에이전트 등록(최초 1회). --code가 있으면 로컬 기록과 무관하게 서버에 등록(회수 후 재등록)
-  proxy              단일 RP 프록시(레거시) — 로컬 토큰 기본 적용, 무토큰은 --insecure-no-token 명시 시에만(경고)
-  did                이 에이전트 did:jwk 출력
-  session            위임 세션 bearer 1회 발급(stdout)
-  credentials clear  캐시된 위임 VC 삭제(--url 지정 시 해당 RP만) — 위임 철회 후 재발급 대기로 전환
-  credentials import --url <RP> <파일>   /1 RP 의 위임 VC 저장(§8 회수 전까지의 경로)
-  credentials unhold --url <RP>          /1 에서 보류한 위임을 다시 제시(RP 갱신 후)
+위임 VC
+  credentials clear [--url <RP>]        저장된 위임 VC를 지웁니다. 다음 실행 때 지갑 승인을 기다립니다.
+  credentials import --url <RP> <파일>  /1 RP의 위임 VC를 파일에서 저장합니다.
+  credentials unhold --url <RP>         보류된 위임을 다시 씁니다(RP가 갱신된 뒤).
 
-위임 제약 거부(spec §11.1):
-  constraints_missing·_malformed·_not_atomic → 그 위임은 어디서도 못 쓴다 — VC 를 지우고 재발급 대기
-  constraints_unknown_key → RP 가 아직 모르는 제약 — VC 는 보관하고 재시도하지 않는다.
-                     RP 가 갱신되면 데몬을 다시 시작하면 된다(재시작이 곧 재시도).
-                     /1 RP 는 보류가 재시작 뒤에도 남는다 — credentials unhold --url 로 푼다
+RP 하나만 다룰 때
+  register --url <RP> --code <코드>     에이전트만 등록합니다(데몬 설정은 바꾸지 않습니다).
+  proxy --url <RP> [--port <N>]         RP 하나만 중계합니다(이전 방식).
+  session --url <RP>                    세션 bearer를 한 번 발급해 출력합니다.
+  did                                   이 에이전트의 did:jwk를 출력합니다.
 
-옵션:
-  --url <URL>        Briefick 베이스 URL (또는 env BRIEFICK_URL)
-  --code <CODE>      에이전트 페이지의 페어링 코드 (또는 env PAIRING_CODE) — register 최초 1회만
-  --label <이름>     RP 목록에 표시할 이름 (기본: 이 머신의 호스트 이름) — register·add
-  --port <N>         proxy·up 리슨 포트 (기본 8787, 127.0.0.1 전용)
-                     up 에 주면 **이번 실행만** — 설정에 저장하지 않는다
-  --mcp-path <PATH>  RP MCP 경로 (기본 /api/mcp)
-  --verifier <URL>   add: 이 RP 는 /1 — 이 검증자(예: https://sso.cplabs.io)에서 세션 토큰을 받는다.
-                     페어링 코드 없이 저장한다(§7 페어링은 아직 RP 쪽에서)
-  --verifier-rp <이름>  add: 검증자 등록부의 RP 별칭(기본 alias)
-  --key-file <PATH>  키 파일 경로 (기본 ~/.metapass-agent/key.json, env METAPASS_AGENT_KEY_FILE)
-  --key-backend <B>  키 저장 백엔드: file(기본) | keychain (env METAPASS_AGENT_KEY_BACKEND)
-                     keychain = macOS Keychain(security) / Linux libsecret(secret-tool) — 평문 파일 없음.
-                     기존 key.json이 있으면 최초 1회 자동 이관(이관 후 파일 삭제 권장)
-  --force            이미 등록됐어도 재등록
-  -v, --version      이 CLI 의 판을 출력
-  -h, --help         이 도움말
+업데이트
+  upgrade [--check]                     최신 릴리스로 올립니다(서명 확인 후 교체, 서비스 재시작).
+                                        --check: 내려받지 않고 버전만 비교합니다.
 
-⚠️ 모르는 옵션은 **거부**한다(무시하지 않는다). 옛 판에서 새 플래그를 쓰면 조용히 빠져
-   «된 것처럼» 보이던 것을 막는다 — 예: 0.3.0 에서 "up --install" 은 그냥 "up" 이었다.`;
+옵션
+  --port <N>             up·proxy 포트(기본 8787, 127.0.0.1에서만). up에 주면 이번 실행에만 적용됩니다.
+  --mcp-path <경로>      RP의 MCP 경로(기본 /api/mcp)
+  --key-file <경로>      키 파일(기본 ~/.metapass-agent/key.json, 환경 변수 METAPASS_AGENT_KEY_FILE)
+  --key-backend <종류>   file(기본) 또는 keychain(macOS 키체인, Linux libsecret).
+                         keychain을 처음 쓰면 기존 key.json을 옮겨 옵니다. 옮긴 뒤 파일은 지우세요.
+  --insecure-no-token    proxy: 로컬 토큰 없이 엽니다(권장하지 않음).
+  --force                이미 등록돼 있어도 다시 등록합니다.
+  -v, --version          버전을 출력합니다.
+  -h, --help             이 도움말을 출력합니다.
+  --url·--code는 환경 변수 BRIEFICK_URL·PAIRING_CODE로도 줄 수 있습니다.
+
+위임이 거부되면(RP의 constraint_denied)
+  constraints_missing·malformed·not_atomic   그 위임은 쓸 수 없습니다. 지우고 새 승인을 기다립니다.
+  constraints_unknown_key                    RP가 아직 모르는 제약입니다. 위임은 보관하고 다시 시도하지 않습니다.
+                                             RP가 갱신되면 데몬을 다시 시작하세요(/1 RP는 credentials unhold).
+
+알 수 없는 옵션이 있으면 아무것도 실행하지 않고 끝납니다.`;
 
 /**
  * The one place a client is constructed, so the version it reports is wired once.

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { invocation, helpText } from "../src/cli.js";
 
 const NPX = "npx @metadium-did/platform-agent-js";
@@ -24,13 +25,28 @@ describe("도움말은 «방금 친 그 호출 형태»로 자기를 부른다",
       .toBe(strip(helpText(invocation(false, BIN)), NPX));
   });
 
-  it("대조군 — 도움말이 실제로 호출 형태를 여러 번 쓴다(0-기반 공허 단언 방지)", () => {
+  it("대조군 — 도움말이 실제로 호출 형태를 쓴다(0-기반 공허 단언 방지)", () => {
     const h = helpText(invocation(true, BIN));
-    expect(h.split(BIN).length - 1).toBeGreaterThan(5);
+    expect(h.split(BIN).length - 1).toBeGreaterThanOrEqual(3);
   });
 
   it("invocation: SEA 면 execPath, 아니면 npx", () => {
     expect(invocation(true, BIN)).toBe(BIN);
     expect(invocation(false, BIN)).toBe(NPX);
+  });
+});
+
+describe("도움말은 파서가 아는 옵션을 모두 말한다", () => {
+  // The flags `parse` accepts, read from its `a === "--x"` branches, so a new flag can't ship undocumented.
+  const src = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
+  const parse = src.slice(src.indexOf("function parse("), src.indexOf("\n}\n", src.indexOf("function parse(")));
+  const flags = [...parse.matchAll(/a === "(--?[a-z-]+)"/g)].map((m) => m[1]);
+
+  it("대조군 — 파서에서 옵션을 읽어 냈다", () => {
+    expect(flags).toEqual(expect.arrayContaining(["--url", "--verifier", "--insecure-no-token", "-h"]));
+  });
+
+  it.each(flags)("%s", (flag) => {
+    expect(helpText(invocation(false, BIN))).toMatch(new RegExp(`(^|[\\s\\[,·(])${flag.replace(/-/g, "\\-")}(?![a-z-])`, "m"));
   });
 });
