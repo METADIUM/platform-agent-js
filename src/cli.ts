@@ -8,6 +8,7 @@
  * 키는 `~/.metapass-agent/key.json`에 영속 → **최초 1회만 등록, 이후 재사용**. `--url`/`--code`는
  * 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
  */
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MINISIGN_PUBLIC_KEYS } from "./release-key.js";
@@ -24,7 +25,7 @@ import { exchangeSessionToken } from "./session.js";
 import { DEFAULT_POLL_INTERVAL_S, latest, pickup, pickupMessage, type PickupResult } from "./pickup.js";
 import { constraintRefusalAction } from "./constraint-refusal.js";
 import { startProxy, type BearerSource } from "./proxy.js";
-import { defaultKeyFile, loadStore, openStore, type AgentStore, type KeyStore } from "./keystore.js";
+import { defaultKeyFile, loadStore, openStore, type AgentStore, type DroppedVc, type KeyStore } from "./keystore.js";
 import {
   aliasFromUrl, configDir, ensureToken, loadConfig, mcpAddCommand, rotateToken, saveConfig,
   type DaemonConfig, type DaemonRp,
@@ -245,6 +246,7 @@ export function updateStore(store: AgentStore, data: KeyStore, change: (fresh: K
   data.credentials = fresh.credentials;
   data.registrations = fresh.registrations;
   data.held = fresh.held;
+  data.dropped = fresh.dropped;
 }
 
 /** 캐시된 위임 VC 삭제. 있었으면 true. With `only`, deletes it only while it is still that VC. */
@@ -286,9 +288,11 @@ export async function recoverSessionFailure(
   url: string,
   store: AgentStore,
   key: AgentKey,
+  /** The VC that was presented, when the caller knows it; else the one in memory now. */
+  presented?: string,
 ): Promise<string | null> {
   if (!(e instanceof AgentClientError)) return null;
-  const refused = data.credentials?.[url];
+  const refused = presented ?? data.credentials?.[url];
   if (e.httpStatus === 401) {
     throw new AgentClientError(registerGuide(e, url), e.httpStatus, e.body);
   }
@@ -530,7 +534,7 @@ export async function connectTarget(
       try {
         await auth.start();
       } catch (e) {
-        const fresh = await recoverSessionFailure(e, client, data, rp.url, store, key).catch((r: unknown) => {
+        const fresh = await recoverSessionFailure(e, client, data, rp.url, store, key, credential).catch((r: unknown) => {
           if (r instanceof DelegationHeldError) target.heldCredential = credential;
           throw r;
         });
@@ -565,19 +569,54 @@ export interface V1Deps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** VCs an RP refused with §11.1 `drop`, per RP: pickup is repeatable and would hand them back (in memory only). */
-const droppedVcs = new Map<string, Set<string>>();
+/** The longest pickup interval honoured from an RP (s); anything above, non-finite or non-positive is ignored. */
+const MAX_POLL_INTERVAL_S = 3600;
 
-/** §8: poll pickup at the RP's interval until a live delegation arrives, store it, and return it. */
-async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, store: AgentStore, deps: Required<V1Deps>): Promise<string> {
+export function vcDigest(vc: string): string {
+  return createHash("sha256").update(vc, "utf8").digest("base64url");
+}
+
+function vcExp(vc: string): number | null {
+  try {
+    const exp = (JSON.parse(Buffer.from(vc.split(".")[1] ?? "", "base64url").toString("utf8")) as { exp?: unknown }).exp;
+    return typeof exp === "number" && Number.isFinite(exp) ? exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Dropped VCs still live: an expired one can't come back from pickup anyway. */
+function liveDropped(list: KeyStore["dropped"], url: string, nowS: number): DroppedVc[] {
+  return (list?.[url] ?? []).filter((d) => d.exp === null || d.exp > nowS);
+}
+
+function isDropped(store: AgentStore, data: KeyStore, url: string, vc: string): boolean {
+  const digest = vcDigest(vc);
+  const nowS = Date.now() / 1000;
+  return [store.load() ?? data, data].some((s) => liveDropped(s.dropped, url, nowS).some((d) => d.digest === digest));
+}
+
+/** A pickup `interval` the RP sent, kept only when it is a sane number; never below the 60 s floor (§8). */
+function pollInterval(current: number, sent: unknown): number {
+  const s = typeof sent === "number" && Number.isFinite(sent) && sent > 0 ? Math.min(sent, MAX_POLL_INTERVAL_S) : 0;
+  return Math.max(DEFAULT_POLL_INTERVAL_S, current, s);
+}
+
+/**
+ * §8: poll pickup at the RP's interval until a live delegation arrives, store it, and return it. Null when the RP
+ * has no §8 pickup (404): polling it would never succeed, so the VC has to come by `credentials import`.
+ */
+async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, store: AgentStore, deps: Required<V1Deps>): Promise<string | null> {
   let interval = DEFAULT_POLL_INTERVAL_S;
+  let notFound = 0;
   for (;;) {
     let reason: string;
     try {
       const r = await deps.pickup();
+      if (r.ok || r.error !== "no_pickup") notFound = 0;
       if (r.ok) {
-        const dropped = droppedVcs.get(rp.url);
-        const d = latest(r.delegations.filter((x) => !dropped?.has(x.credential)));
+        // Persisted, so a restart doesn't re-adopt a VC this agent already saw refused (minipaas, Briefick).
+        const d = latest(r.delegations.filter((x) => !isDropped(store, data, rp.url, x.credential)));
         if (d) {
           const fresh = store.load() ?? data;
           fresh.credentials = { ...(fresh.credentials ?? {}), [rp.url]: d.credential };
@@ -587,11 +626,19 @@ async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, st
           return d.credential;
         }
         reason = "위임 대기 — 지갑에서 승인하면 자동으로 받습니다";
+      } else if (r.error === "no_pickup" && ++notFound >= 2) {
+        // Two in a row, an interval apart: one 404 can be a deploy in progress (Briefick).
+        target.pendingReason = `이 RP는 §8 회수를 지원하지 않습니다 — credentials import --url ${rp.url} <파일>`;
+        console.error(`[${rp.alias}] ${target.pendingReason}`);
+        return null;
+      } else if (r.error === "no_pickup") {
+        reason = `회수 경로가 없습니다(404) — ${interval}초 후 한 번 더 확인합니다`;
       } else {
-        if (r.interval) interval = Math.max(interval, r.interval);
+        interval = pollInterval(interval, r.interval);
         reason = pickupMessage(r, rp.url);
       }
     } catch (e) {
+      notFound = 0;   // "two in a row" means two answers in a row; an error between them breaks the run
       reason = `회수 실패 — ${interval}초 후 재시도: ${e instanceof Error ? e.message : String(e)}`;
     }
     if (reason !== target.pendingReason) console.error(`[${rp.alias}] ${reason}`);
@@ -609,15 +656,19 @@ export async function connectV1Target(
   deps: V1Deps = {},
 ): Promise<DelegationSessionAuth | null> {
   let credential = data.credentials?.[rp.url];
+  // A VC this agent already saw refused is never presented again, from memory or the store (metapass-saas B1).
+  if (credential && isDropped(store, data, rp.url, credential)) credential = undefined;
   if (!credential) {
     if (!deps.pickup) {
       target.pendingReason = `위임 VC 없음 — credentials import --url ${rp.url} <파일>`;
       return null;
     }
-    credential = await waitPickup(target, data, rp, store, {
+    const picked = await waitPickup(target, data, rp, store, {
       pickup: deps.pickup,
       sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     });
+    if (!picked) return null;
+    credential = picked;
   }
   const held = data.held?.[rp.url];
   if (held?.credential === credential) {
@@ -629,11 +680,26 @@ export async function connectV1Target(
   // Re-read before writing: `credentials import`/`unhold` may have changed the store since `up` (metapass-saas).
   const persistStopped = (s: Extract<SessionState, { status: "dropped" | "held" }>): void => {
     const fresh = store.load();
-    if (!fresh || fresh.credentials?.[rp.url] !== vc) return;
+    if (!fresh) return;
+    if (s.status === "dropped") {
+      // Remembered even when a newer VC is stored now: this one was refused, and pickup would hand it back.
+      const nowS = Date.now() / 1000;
+      const seen = liveDropped(fresh.dropped, rp.url, nowS).filter((d) => d.digest !== vcDigest(vc));
+      fresh.dropped = { ...(fresh.dropped ?? {}), [rp.url]: [...seen, { digest: vcDigest(vc), exp: vcExp(vc) }] };
+      data.dropped = fresh.dropped;
+      // Out of memory too, whatever the store holds now: the reconnect below must not present it again (B1).
+      if (data.credentials?.[rp.url] === vc) {
+        const { [rp.url]: _mem, ...restMem } = data.credentials;
+        data.credentials = restMem;
+      }
+    }
+    if (fresh.credentials?.[rp.url] !== vc) {
+      if (s.status === "dropped") store.save(fresh);
+      return;
+    }
     if (s.status === "dropped") {
       const { [rp.url]: _gone, ...rest } = fresh.credentials;
       fresh.credentials = rest;
-      droppedVcs.set(rp.url, (droppedVcs.get(rp.url) ?? new Set()).add(vc));
       console.error(`[${rp.alias}] 위임 폐기(${s.error}) — 저장된 VC 삭제, 새 위임 필요`);
     } else {
       const { status: _s, ...h } = s;
@@ -656,12 +722,16 @@ export async function connectV1Target(
         // Thrown from the session's callback, this would end the daemon (Briefick).
         console.error(`[${rp.alias}] 위임 상태 저장 실패: ${e instanceof Error ? e.message : String(e)}`);
       }
-      // A dropped VC is gone: wait for a new delegation by pickup, as on a first start.
+      // A dropped VC is gone: wait one interval, then look for a new delegation by pickup. The wait bounds any
+      // drop → reconnect cycle to one per interval, whatever caused the drop (metapass-saas B1).
       if (s.status === "dropped" && deps.pickup && target.auth === auth) {
         target.auth = null;
-        void connectV1Target(target, data, rp, store, key, deps).catch((e: unknown) => {
-          target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
-        });
+        const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+        void sleep(DEFAULT_POLL_INTERVAL_S * 1000)
+          .then(() => connectV1Target(target, data, rp, store, key, deps))
+          .catch((e: unknown) => {
+            target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
+          });
       }
     },
   });
@@ -886,8 +956,7 @@ export async function main(argv: string[]): Promise<number> {
     if (!args.code) return fail("--code (또는 PAIRING_CODE) 필요 — Briefick 에이전트 페이지의 페어링 코드");
     const client = agentClient(args.url, key);
     await client.register(args.code, registerLabel(args));
-    data.registrations = { ...(data.registrations ?? {}), [args.url]: true };
-    store.save(data);
+    updateStore(store, data, (s) => { s.registrations = { ...(s.registrations ?? {}), [args.url!]: true }; });
     console.log(
       `✅ 등록 완료.\n  DID: ${key.did}\n  지문: ${key.fingerprint} (에이전트 페이지 표시와 대조)\n  키 저장: ${store.location} — 이후 재실행 시 재사용(재등록 불필요)${
         created ? "" : "\n  (기존 키 재사용)"
@@ -990,8 +1059,7 @@ export async function main(argv: string[]): Promise<number> {
       if (!args.code) return fail("--code 필요(최초 페어링) — RP의 에이전트 등록 화면에서 발급");
       const client = agentClient(url, key);
       await client.register(args.code, registerLabel(args));
-      data.registrations = { ...(data.registrations ?? {}), [url]: true };
-      store.save(data);
+      updateStore(store, data, (s) => { s.registrations = { ...(s.registrations ?? {}), [url]: true }; });
     }
     const v1 = args.verifier
       ? { verifierUrl: args.verifier.replace(/\/+$/, ""), verifierRp: args.verifierRp ?? alias }
