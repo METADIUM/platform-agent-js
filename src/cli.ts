@@ -623,6 +623,7 @@ export const helpText = (inv: string = invocation()): string => `metapass-agent 
                                     [--alias 이름] [--label 표시 이름]
   add <RP_URL> --verifier <URL>     /1 RP를 추가합니다(페어링 코드 없이). [--verifier-rp 등록부 별칭]
   up [--install]                    등록된 모든 RP를 127.0.0.1:<포트>/<alias>/mcp로 제공합니다.
+                                    로컬 토큰이 필요합니다(GET /healthz만 예외).
                                     --install: OS 서비스(launchd, systemd --user)로 설치하고 시작합니다.
   down --uninstall                  OS 서비스를 중지하고 제거합니다.
   status                            데몬 상태, RP별 위임 상태, Claude Code 등록 명령을 보여 줍니다.
@@ -636,6 +637,7 @@ export const helpText = (inv: string = invocation()): string => `metapass-agent 
 
 RP 하나만 다룰 때
   register --url <RP> --code <코드>     에이전트만 등록합니다(데몬 설정은 바꾸지 않습니다).
+                                        RP가 등록을 회수했다면 새 코드로 이 명령을 다시 실행하세요.
   proxy --url <RP> [--port <N>]         RP 하나만 중계합니다(이전 방식).
   session --url <RP>                    세션 bearer를 한 번 발급해 출력합니다.
   did                                   이 에이전트의 did:jwk를 출력합니다.
@@ -651,7 +653,7 @@ RP 하나만 다룰 때
   --key-backend <종류>   file(기본) 또는 keychain(macOS 키체인, Linux libsecret).
                          keychain을 처음 쓰면 기존 key.json을 옮겨 옵니다. 옮긴 뒤 파일은 지우세요.
   --insecure-no-token    proxy: 로컬 토큰 없이 엽니다(권장하지 않음).
-  --force                이미 등록돼 있어도 다시 등록합니다.
+  --force                이미 등록돼 있어도 다시 등록합니다. add --verifier에서는 기존 v0 RP를 /1로 바꿉니다.
   -v, --version          버전을 출력합니다.
   -h, --help             이 도움말을 출력합니다.
   --url·--code는 환경 변수 BRIEFICK_URL·PAIRING_CODE로도 줄 수 있습니다.
