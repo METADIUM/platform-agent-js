@@ -651,7 +651,7 @@ RP 하나만 다룰 때
   --key-backend <종류>   file(기본) 또는 keychain(macOS 키체인, Linux libsecret).
                          keychain을 처음 쓰면 기존 key.json을 옮겨 옵니다. 옮긴 뒤 파일은 지우세요.
   --insecure-no-token    proxy: 로컬 토큰 없이 엽니다(권장하지 않음).
-  --force                이미 등록돼 있어도 다시 등록합니다.
+  --force                이미 등록돼 있어도 다시 등록합니다. add --verifier에서는 기존 v0 RP를 /1로 바꿉니다.
   -v, --version          버전을 출력합니다.
   -h, --help             이 도움말을 출력합니다.
   --url·--code는 환경 변수 BRIEFICK_URL·PAIRING_CODE로도 줄 수 있습니다.
