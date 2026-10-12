@@ -49,6 +49,8 @@ export interface DelegationSessionOptions {
   now?: () => number;
   /** Schedules the next attempt; returns a cancel function. */
   schedule?: (ms: number, fn: () => void) => () => void;
+  /** The session became `dropped` or `held`, so the caller can persist it. */
+  onStopped?: (state: Extract<SessionState, { status: "dropped" | "held" }>) => void;
 }
 
 export class DelegationSessionAuth implements CallAuth {
@@ -93,9 +95,11 @@ export class DelegationSessionAuth implements CallAuth {
   /** §11.1: `drop` makes the VC unusable, as `invalid_delegation` does; `keep` holds it unpresented. Both stop refreshing. */
   refused(action: ConstraintRefusalAction, reason: string, keys: string[], keysTotal?: number): void {
     this.stop();
-    this.current = action === "drop"
+    const s: Extract<SessionState, { status: "dropped" | "held" }> = action === "drop"
       ? { status: "dropped", error: `constraint_denied: ${reason}` }
       : { status: "held", reason, keys, ...(keysTotal !== undefined ? { keysTotal } : {}) };
+    this.current = s;
+    this.o.onStopped?.(s);
   }
 
   async callHeaders(method: string, htu: string, body: Uint8Array): Promise<Record<string, string>> {
@@ -152,7 +156,9 @@ export class DelegationSessionAuth implements CallAuth {
       if (this.stopped) return;
       const err = e as Partial<SessionExchangeError>;
       if (err.dropVc) {
-        this.current = { status: "dropped", error: String(err.message ?? e) };
+        const s = { status: "dropped" as const, error: String(err.message ?? e) };
+        this.current = s;
+        this.o.onStopped?.(s);
         return;
       }
       this.current = { status: "retrying", expiresAt: this.token?.expiresAt.toISOString(), lastError: String(err.message ?? e) };

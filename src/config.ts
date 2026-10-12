@@ -16,6 +16,10 @@ export interface DaemonRp {
   url: string;
   /** RP MCP 경로 (기본 /api/mcp). */
   mcpPath?: string;
+  /** Set for an RP that serves `/1` (spec §10): the verifier that exchanges the VC for a session token (§9). */
+  verifierUrl?: string;
+  /** This RP's alias in the verifier's registry (the `/agent/token` body's `rp`). */
+  verifierRp?: string;
 }
 
 export interface DaemonConfig {
