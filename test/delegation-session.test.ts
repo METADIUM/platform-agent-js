@@ -214,7 +214,7 @@ describe("daemon with a /1 target", () => {
 
   it("sends the session token and a proof whose htu is the public URL without the query; drops a client's own proof", async () => {
     const up = await rp(() => ({ status: 200 }));
-    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url + "?x=1", auth: await session() }], token: "t" });
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url + "?x=1", auth: await session() }], token: "t", port: 0 });
     const r = await post("/mcp", { "agent-proof": "forged" });
     expect(r.status).toBe(200);
     expect(up.seen[0].authorization).toBe("Delegation a.b.c");
@@ -226,7 +226,7 @@ describe("daemon with a /1 target", () => {
     const ahead = new Date(Date.now() + 120_000).toUTCString();
     const fresh = { status: 401, headers: { "www-authenticate": 'Delegation error="use_fresh_time"', date: ahead } };
     const up = await rp(() => fresh);
-    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: await session() }], token: "t" });
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: await session() }], token: "t", port: 0 });
     const r = await post("/mcp");
     expect(r.status).toBe(401);
     expect(up.seen.length, "use_fresh_time was retried more than once").toBe(2);
@@ -243,7 +243,7 @@ describe("daemon with a /1 target", () => {
     "drops the delegation on a 403 constraint_denied %s, and stops calling the RP", async (reason) => {
       const up = await rp(() => denied(reason));
       const s = await session();
-      daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+      daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t", port: 0 });
       const first = await post("/mcp");
       expect(first.status).toBe(403);
       expect(first.body, "the RP's refusal wasn't passed through").toMatchObject({ error: "constraint_denied", reason });
@@ -258,7 +258,7 @@ describe("daemon with a /1 target", () => {
   it("holds the delegation on constraints_unknown_key and names the keys", async () => {
     const up = await rp(() => denied("constraints_unknown_key", ["maxAmount"]));
     const s = await session();
-    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t", port: 0 });
     expect((await post("/mcp")).status).toBe(403);
     expect(s.state()).toEqual({ status: "held", reason: "constraints_unknown_key", keys: ["maxAmount"] });
     const second = await post("/mcp");
@@ -273,7 +273,7 @@ describe("daemon with a /1 target", () => {
     const big = JSON.stringify({ error: "constraint_denied", reason: "constraints_missing", pad: "x".repeat(64 * 1024) });
     const up = await rp(() => ({ status: 403, body: big }));
     const s = await session();
-    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t", port: 0 });
     const r = await fetch(`http://127.0.0.1:${daemon.port}/mcp`, { method: "POST", headers: { authorization: "Bearer t" }, body: "{}" });
     expect(r.status).toBe(403);
     expect((await r.text()).length, "the body was truncated").toBe(big.length);
@@ -283,7 +283,7 @@ describe("daemon with a /1 target", () => {
   it("names how many keys there were when keys is capped (keysTotal)", async () => {
     const up = await rp(() => ({ status: 403, body: JSON.stringify({ error: "constraint_denied", reason: "constraints_unknown_key", keys: ["a", "b"], keysTotal: 5 }) }));
     const s = await session();
-    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t", port: 0 });
     await post("/mcp");
     const second = await post("/mcp");
     expect(String(second.body.message)).toContain("a,b and 3 more");
@@ -295,7 +295,7 @@ describe("daemon with a /1 target", () => {
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
     closers.push(() => server.close());
     daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}/api/mcp`,
-      auth: await session() }], token: "t" });
+      auth: await session() }], token: "t", port: 0 });
     await fetch(`http://127.0.0.1:${daemon.port}/mcp`, { method: "POST", headers: { authorization: "Bearer t", "accept-encoding": "gzip" }, body: "{}" });
     expect(seen[0], "the client's accept-encoding reached the /1 RP").toBeUndefined();
   });
@@ -308,7 +308,7 @@ describe("daemon with a /1 target", () => {
   ])("leaves the session alone on a 403 with %s", async (_label, body) => {
     const up = await rp(() => ({ status: 403, body }));
     const s = await session();
-    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t", port: 0 });
     const r = await fetch(`http://127.0.0.1:${daemon.port}/mcp`, { method: "POST", headers: { authorization: "Bearer t" }, body: "{}" });
     expect(r.status).toBe(403);
     expect(await r.text(), "the body wasn't passed through unchanged").toBe(body);
@@ -324,7 +324,7 @@ describe("daemon with a /1 target", () => {
       exchange: async () => { throw new SessionExchangeError(400, "invalid_delegation", []); },
     });
     await s.start();
-    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t", port: 0 });
     const r = await post("/mcp");
     expect(r.status).toBe(503);
     expect(r.body).toMatchObject({ error: "delegation_dropped", alias: "a" });
