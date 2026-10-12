@@ -297,7 +297,8 @@ export async function recoverSessionFailure(
     const list = strings(body?.reasons);
     if (constraintRefusalAction(list) === "keep") throw new DelegationHeldError(url, list, strings(body?.keys));
     console.error(`위임이 무효화됐습니다(${e.message}) — 캐시를 비우고 지갑 재발급 승인 대기로 전환합니다`);
-    clearCredential(store, data, url, refused);
+    // Nothing in memory was refused, so there is nothing to clear; a VC on disk now is a newer one (Briefick).
+    if (refused !== undefined) clearCredential(store, data, url, refused);
     return waitCredential(client, data, url, store, key);
   }
   if (e.message.includes("세션 완료 타임아웃")) {

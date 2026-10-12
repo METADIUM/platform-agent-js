@@ -82,3 +82,18 @@ describe("the session token is never logged", () => {
     expect(out.join("\n")).not.toContain(TOKEN);
   });
 });
+
+describe("the v0 refused path with no VC in memory (Briefick, #48)", () => {
+  it("doesn't delete a VC that reached the store from elsewhere", async () => {
+    const { recoverSessionFailure } = await import("../src/cli.js");
+    const { AgentClientError } = await import("../src/briefick.js");
+    const { store, key, data } = await fileStore();
+    data.credentials = {};                                             // nothing in memory was presented
+    store.save({ ...store.load()!, credentials: { A: "a-imported" } });  // imported meanwhile
+    // The retrieve that follows fails, so whatever the clear did is what stays on disk.
+    const client = { waitForDelegation: async () => { throw new Error("timeout"); } } as unknown as Parameters<typeof recoverSessionFailure>[1];
+    const refusal = new AgentClientError("세션 거부: constraints_missing", 403, { reasons: ["constraints_missing"] });
+    await expect(recoverSessionFailure(refusal, client, data, "A", store, key)).rejects.toThrow("timeout");
+    expect(store.load()!.credentials?.A, "the refusal deleted a VC it never presented").toBe("a-imported");
+  });
+});
