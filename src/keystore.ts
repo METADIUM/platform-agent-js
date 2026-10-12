@@ -153,7 +153,12 @@ export function loadKeychainStore(opts: KeychainOptions = {}): KeyStore | null {
   if (r.status === null) {
     throw new Error(`키체인 도구(${cmd})를 찾을 수 없습니다 — file 백엔드를 사용하거나 도구를 설치하세요`);
   }
-  if (r.status !== 0 || !r.stdout.trim()) return null; // 미존재(macOS 44 / secret-tool 1)
+  const platform = opts.platform ?? process.platform;
+  // Only "no such item" means no key yet: macOS 44 (errSecItemNotFound), secret-tool 1 with nothing on stderr.
+  // A locked or denied keychain (36, 128, …) must not read as "no key", or a new key would replace it (metapass-saas).
+  const notFound = platform === "darwin" ? r.status === 44 : r.status === 1 && !r.stderr.trim();
+  if (notFound) return null;
+  if (r.status !== 0) throw unreadable(`${cmd} exit ${r.status}`, r.stderr.trim() || "키체인 오류");
   return parseStore(r.stdout.trim(), cmd);
 }
 

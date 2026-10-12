@@ -167,3 +167,17 @@ describe("an unreadable key store is refused, never regenerated (metapass-saas F
     if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
   });
 });
+
+describe("a keychain that can't be read is not «no key» (metapass-saas, #47)", () => {
+  const exit = (status: number, stderr = ""): ExecFn => () => ({ status, stdout: "", stderr });
+  it.each([36, 128, 51])("macOS: security exit %i throws", (status) => {
+    expect(() => loadKeychainStore({ exec: exit(status, "locked"), platform: "darwin" })).toThrow(/새 키를 만들지 않습니다/);
+  });
+  it("macOS: exit 44 (item not found) is «no key yet»", () => {
+    expect(loadKeychainStore({ exec: exit(44, "could not be found"), platform: "darwin" })).toBeNull();
+  });
+  it("Linux: secret-tool exit 1 with nothing on stderr is «no key yet»; with an error it throws", () => {
+    expect(loadKeychainStore({ exec: exit(1), platform: "linux" })).toBeNull();
+    expect(() => loadKeychainStore({ exec: exit(1, "Cannot autolaunch D-Bus"), platform: "linux" })).toThrow(/새 키를 만들지 않습니다/);
+  });
+});
