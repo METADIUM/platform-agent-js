@@ -214,8 +214,9 @@ async function waitCredential(
     }
     throw e;
   });
-  data.credentials = { ...(data.credentials ?? {}), [url]: cred };
-  store.save(data);
+  updateStore(store, data, (s) => {
+    s.credentials = { ...(s.credentials ?? {}), [url]: cred };
+  });
   return cred;
 }
 
@@ -232,12 +233,30 @@ async function ensureCredential(
   return waitCredential(client, data, url, store, key);
 }
 
-/** 캐시된 위임 VC 삭제. 있었으면 true. */
-function clearCredential(store: AgentStore, data: KeyStore, url: string): boolean {
-  if (!data.credentials?.[url]) return false;
-  delete data.credentials[url];
-  store.save(data);
-  return true;
+/**
+ * Change the store against a fresh read and mirror it into `data`, the daemon's copy. Another process
+ * (`credentials import`, `unhold`) may have written since `data` was loaded; saving `data` whole would undo it.
+ */
+export function updateStore(store: AgentStore, data: KeyStore, change: (fresh: KeyStore) => void): void {
+  const fresh = store.load() ?? data;
+  change(fresh);
+  store.save(fresh);
+  data.credentials = fresh.credentials;
+  data.registrations = fresh.registrations;
+  data.held = fresh.held;
+}
+
+/** 캐시된 위임 VC 삭제. 있었으면 true. With `only`, deletes it only while it is still that VC. */
+export function clearCredential(store: AgentStore, data: KeyStore, url: string, only?: string): boolean {
+  let had = false;
+  updateStore(store, data, (s) => {
+    const current = s.credentials?.[url];
+    if (!current || (only !== undefined && current !== only)) return;
+    const { [url]: _gone, ...rest } = s.credentials!;
+    s.credentials = rest;
+    had = true;
+  });
+  return had;
 }
 
 /** The RP refused the delegation for a limit it does not understand (spec §11.1 `keep`): the VC stays, unused. */
@@ -268,6 +287,7 @@ export async function recoverSessionFailure(
   key: AgentKey,
 ): Promise<string | null> {
   if (!(e instanceof AgentClientError)) return null;
+  const refused = data.credentials?.[url];
   if (e.httpStatus === 401) {
     throw new AgentClientError(registerGuide(e, url), e.httpStatus, e.body);
   }
@@ -277,7 +297,8 @@ export async function recoverSessionFailure(
     const list = strings(body?.reasons);
     if (constraintRefusalAction(list) === "keep") throw new DelegationHeldError(url, list, strings(body?.keys));
     console.error(`위임이 무효화됐습니다(${e.message}) — 캐시를 비우고 지갑 재발급 승인 대기로 전환합니다`);
-    clearCredential(store, data, url);
+    // Nothing in memory was refused, so there is nothing to clear; a VC on disk now is a newer one (Briefick).
+    if (refused !== undefined) clearCredential(store, data, url, refused);
     return waitCredential(client, data, url, store, key);
   }
   if (e.message.includes("세션 완료 타임아웃")) {
@@ -461,8 +482,9 @@ export async function watchForNewerDelegation(
       // 🔴 Persist BEFORE touching the session. The RP has already moved this delegation to
       //    `retrieved` and deleted its copy, so from here this process holds the only one —
       //    dying between here and the save loses the user's approval, silently.
-      data.credentials = { ...(data.credentials ?? {}), [rp.url]: r.credential! };
-      store.save(data);
+      updateStore(store, data, (s) => {
+        s.credentials = { ...(s.credentials ?? {}), [rp.url]: r.credential! };
+      });
       console.error(`[${rp.alias}] 새 위임 수령 — 세션을 다시 엽니다`);
       // `DaemonTarget.auth` is a `BearerSource`, which only promises `bearer()`. Narrow rather than
       // cast: a future source that is not an AgentAuth must not be stopped by a wrong assumption.
