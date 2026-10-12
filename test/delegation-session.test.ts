@@ -57,6 +57,36 @@ describe("DelegationSessionAuth", () => {
       "a request without a body carries no bh").toBeUndefined();
   });
 
+  /** A refusal while an exchange is in flight stays: the late answer doesn't bring the session back (metapass-saas). */
+  it("stays dropped when an exchange in flight answers after a refusal", async () => {
+    const c = clock();
+    let release!: (t: SessionToken) => void;
+    let calls = 0;
+    const s = new DelegationSessionAuth({
+      key: await AgentKey.generate(), verifier: "v", now: c.now, schedule: c.schedule,
+      exchange: () => (++calls === 1 ? Promise.resolve(token(c, 300)) : new Promise<SessionToken>((r) => (release = r))),
+    });
+    await s.start();
+    await c.fire();   // the scheduled refresh starts and waits on its exchange
+    s.refused("drop", "constraints_missing", []);
+    release(token(c, 300));
+    await new Promise((r) => setImmediate(r));
+    expect(s.state(), "an in-flight refresh revived a refused session").toMatchObject({ status: "dropped" });
+    await expect(s.callHeaders("POST", "https://rp.example/api/mcp", new Uint8Array())).rejects.toMatchObject({ error: "delegation_dropped" });
+  });
+
+  /** After a refusal no refresh is scheduled: the session stops talking to the verifier. */
+  it("cancels the refresh timer on a refusal", async () => {
+    const c = clock();
+    let calls = 0;
+    const s = new DelegationSessionAuth({ key: await AgentKey.generate(), verifier: "v", now: c.now, schedule: c.schedule,
+      exchange: async () => (calls++, token(c, 300)) });
+    await s.start();
+    s.refused("keep", "constraints_unknown_key", ["k"]);
+    await c.fire();
+    expect(calls, "a held session kept exchanging").toBe(1);
+  });
+
   it("refreshes 60 s before exp", async () => {
     const c = clock();
     const s = new DelegationSessionAuth({ key: await AgentKey.generate(), verifier: "v", exchange: async () => token(c, 300), now: c.now, schedule: c.schedule });
@@ -257,6 +287,17 @@ describe("daemon with a /1 target", () => {
     await post("/mcp");
     const second = await post("/mcp");
     expect(String(second.body.message)).toContain("a,b and 3 more");
+  });
+
+  it("asks a /1 RP for an identity body, so a 403 can be read", async () => {
+    const seen: (string | undefined)[] = [];
+    const server = http.createServer((req, res) => { seen.push(req.headers["accept-encoding"] as string | undefined); req.resume(); res.end("{}"); });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    closers.push(() => server.close());
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}/api/mcp`,
+      auth: await session() }], token: "t" });
+    await fetch(`http://127.0.0.1:${daemon.port}/mcp`, { method: "POST", headers: { authorization: "Bearer t", "accept-encoding": "gzip" }, body: "{}" });
+    expect(seen[0], "the client's accept-encoding reached the /1 RP").toBeUndefined();
   });
 
   /** Only constraint_denied with a §11.1 code acts; other refusals keep the session (§10 insufficient_scope etc.). */

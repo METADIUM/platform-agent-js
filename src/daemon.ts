@@ -230,6 +230,8 @@ async function forward(
   headers["content-length"] = String(body.length);
   const auth = target.auth!;
   if (isCallAuth(auth)) {
+    // An encoded 403 couldn't be read for its §10 reason, so ask /1 RPs for an identity body (metapass-saas).
+    delete headers["accept-encoding"];
     try {
       // §11: htu is the public URL the agent called, without the query.
       Object.assign(headers, await auth.callHeaders(creq.method ?? "GET", url.origin + url.pathname + restPath, body));
@@ -276,6 +278,9 @@ async function forward(
           size += c.length;
           if (size <= MAX_REFUSAL_BODY) chunks.push(c);
         });
+        // A reset upstream after the headers went out: end the client's response rather than leave it hanging.
+        pres.on("aborted", () => cres.destroy());
+        pres.on("error", () => cres.destroy());
         pres.on("end", () => {
           cres.end();
           const refusal = size <= MAX_REFUSAL_BODY ? constraintDenial(Buffer.concat(chunks)) : null;

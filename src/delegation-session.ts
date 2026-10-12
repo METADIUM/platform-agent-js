@@ -134,6 +134,8 @@ export class DelegationSessionAuth implements CallAuth {
     if (this.stopped) return;
     try {
       const t = await this.o.exchange();
+      // Stopped while the exchange was in flight (a §11.1 refusal): don't bring the session back (metapass-saas).
+      if (this.stopped) return;
       const previous = this.token;
       this.token = t;
       this.backoff = 1_000;
@@ -147,6 +149,7 @@ export class DelegationSessionAuth implements CallAuth {
       const remaining = t.expiresAt.getTime() - this.now();
       this.next(remaining > REFRESH_AHEAD_MS ? remaining - REFRESH_AHEAD_MS : Math.max(1_000, remaining / 2));
     } catch (e) {
+      if (this.stopped) return;
       const err = e as Partial<SessionExchangeError>;
       if (err.dropVc) {
         this.current = { status: "dropped", error: String(err.message ?? e) };
