@@ -17,6 +17,7 @@ import { timingSafeEqual } from "node:crypto";
 import { URL } from "node:url";
 import type { BearerSource } from "./proxy.js";
 import { isCallAuth, SessionUnavailable, type CallAuth } from "./delegation-session.js";
+import { constraintRefusalAction } from "./constraint-refusal.js";
 
 export interface DaemonTarget {
   alias: string;
@@ -50,6 +51,20 @@ export interface RunningDaemon {
 
 const HOP_BY_HOP = new Set(["host", "connection", "authorization", "keep-alive", "proxy-authorization"]);
 const MAX_BODY = 2 * 1024 * 1024; // MCP 요청은 JSON — 감사(메서드 추출)를 위해 버퍼링
+/** A §10 refusal body is small JSON; past this it's passed through without being read. */
+const MAX_REFUSAL_BODY = 64 * 1024;
+
+/** `{ "error": "constraint_denied", "reason": "<code>", "keys"?: [...] }` (§10), or null. */
+export function constraintDenial(raw: Buffer): { reason: string; keys: string[] } | null {
+  try {
+    const b = JSON.parse(raw.toString("utf8")) as { error?: unknown; reason?: unknown; keys?: unknown };
+    if (b?.error !== "constraint_denied" || typeof b.reason !== "string") return null;
+    const keys = Array.isArray(b.keys) ? b.keys.filter((k): k is string => typeof k === "string") : [];
+    return { reason: b.reason, keys };
+  } catch {
+    return null;
+  }
+}
 
 function tokenOk(expected: string, header: string | undefined): boolean {
   if (!header?.startsWith("Bearer ")) return false;
@@ -247,6 +262,26 @@ async function forward(
         pres.resume();
         auth.setClockOffset(Math.round((date - Date.now()) / 1000));
         void forward(target, restPath, creq, cres, body, true);
+        return;
+      }
+      // §10: a 403 constraint_denied names its §11.1 reason; act on it, and pass the answer through unchanged.
+      if (isCallAuth(auth) && pres.statusCode === 403) {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        pres.on("data", (c: Buffer) => {
+          size += c.length;
+          if (size <= MAX_REFUSAL_BODY) chunks.push(c);
+        });
+        pres.on("end", () => {
+          const raw = Buffer.concat(chunks);
+          const refusal = size <= MAX_REFUSAL_BODY ? constraintDenial(raw) : null;
+          if (refusal) {
+            const action = constraintRefusalAction([refusal.reason]);
+            if (action) auth.refused?.(action, refusal.reason, refusal.keys);
+          }
+          cres.writeHead(403, pres.headers);
+          cres.end(raw);
+        });
         return;
       }
       cres.writeHead(pres.statusCode ?? 502, pres.headers);

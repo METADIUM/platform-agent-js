@@ -147,7 +147,7 @@ describe("daemon with a /1 target", () => {
   });
 
   type Seen = { authorization?: string; proof?: string; url?: string };
-  function rp(answer: (n: number) => { status: number; headers?: Record<string, string> }) {
+  function rp(answer: (n: number) => { status: number; headers?: Record<string, string>; body?: string }) {
     const seen: Seen[] = [];
     return new Promise<{ url: string; seen: Seen[] }>((resolve) => {
       const server = http.createServer((req, res) => {
@@ -155,7 +155,7 @@ describe("daemon with a /1 target", () => {
         req.resume();
         const a = answer(seen.length);
         res.writeHead(a.status, { "content-type": "application/json", ...a.headers });
-        res.end("{}");
+        res.end(a.body ?? "{}");
       });
       server.listen(0, "127.0.0.1", () => {
         closers.push(() => server.close());
@@ -203,6 +203,56 @@ describe("daemon with a /1 target", () => {
     const iat0 = decodeJwt(up.seen[0].proof!).iat!;
     const iat1 = decodeJwt(up.seen[1].proof!).iat!;
     expect(Math.abs(iat1 - iat0 - 120)).toBeLessThanOrEqual(2);
+  });
+
+  const denied = (reason: string, keys?: string[]) =>
+    ({ status: 403, body: JSON.stringify({ error: "constraint_denied", reason, ...(keys ? { keys } : {}) }) });
+
+  /** §10/§11.1: missing, malformed and not_atomic make the VC unusable; the refusal reaches the client unchanged. */
+  it.each(["constraints_missing", "constraints_malformed", "constraints_not_atomic"])(
+    "drops the delegation on a 403 constraint_denied %s, and stops calling the RP", async (reason) => {
+      const up = await rp(() => denied(reason));
+      const s = await session();
+      daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+      const first = await post("/mcp");
+      expect(first.status).toBe(403);
+      expect(first.body, "the RP's refusal wasn't passed through").toMatchObject({ error: "constraint_denied", reason });
+      expect(s.state()).toMatchObject({ status: "dropped" });
+      const second = await post("/mcp");
+      expect(second.status).toBe(503);
+      expect(second.body).toMatchObject({ error: "delegation_dropped" });
+      expect(up.seen.length, "a dropped delegation was presented again").toBe(1);
+    });
+
+  /** §11.1 keep: the RP lags the vct version; the VC stays, but isn't presented again, and the keys are named. */
+  it("holds the delegation on constraints_unknown_key and names the keys", async () => {
+    const up = await rp(() => denied("constraints_unknown_key", ["maxAmount"]));
+    const s = await session();
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+    expect((await post("/mcp")).status).toBe(403);
+    expect(s.state()).toEqual({ status: "held", reason: "constraints_unknown_key", keys: ["maxAmount"] });
+    const second = await post("/mcp");
+    expect(second.status).toBe(503);
+    expect(second.body).toMatchObject({ error: "delegation_held" });
+    expect(String(second.body.message)).toContain("maxAmount");
+    expect(up.seen.length).toBe(1);
+  });
+
+  /** Only constraint_denied with a §11.1 code acts; other refusals keep the session (§10 insufficient_scope etc.). */
+  it.each([
+    ["insufficient_scope", JSON.stringify({ error: "insufficient_scope" })],
+    ["an unknown reason", JSON.stringify({ error: "constraint_denied", reason: "something_else" })],
+    ["a non-JSON body", "forbidden"],
+  ])("leaves the session alone on a 403 with %s", async (_label, body) => {
+    const up = await rp(() => ({ status: 403, body }));
+    const s = await session();
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+    const r = await fetch(`http://127.0.0.1:${daemon.port}/mcp`, { method: "POST", headers: { authorization: "Bearer t" }, body: "{}" });
+    expect(r.status).toBe(403);
+    expect(await r.text(), "the body wasn't passed through unchanged").toBe(body);
+    expect(s.state()).toMatchObject({ status: "active" });
+    await fetch(`http://127.0.0.1:${daemon.port}/mcp`, { method: "POST", headers: { authorization: "Bearer t" }, body: "{}" });
+    expect(up.seen.length, "the session stopped on a refusal it shouldn't act on").toBe(2);
   });
 
   it("answers 503 locally when no token is usable", async () => {
