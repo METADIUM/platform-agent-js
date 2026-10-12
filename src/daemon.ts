@@ -55,12 +55,12 @@ const MAX_BODY = 2 * 1024 * 1024; // MCP 요청은 JSON — 감사(메서드 추
 const MAX_REFUSAL_BODY = 64 * 1024;
 
 /** `{ "error": "constraint_denied", "reason": "<code>", "keys"?: [...] }` (§10), or null. */
-export function constraintDenial(raw: Buffer): { reason: string; keys: string[] } | null {
+export function constraintDenial(raw: Buffer): { reason: string; keys: string[]; keysTotal?: number } | null {
   try {
-    const b = JSON.parse(raw.toString("utf8")) as { error?: unknown; reason?: unknown; keys?: unknown };
+    const b = JSON.parse(raw.toString("utf8")) as { error?: unknown; reason?: unknown; keys?: unknown; keysTotal?: unknown };
     if (b?.error !== "constraint_denied" || typeof b.reason !== "string") return null;
     const keys = Array.isArray(b.keys) ? b.keys.filter((k): k is string => typeof k === "string") : [];
-    return { reason: b.reason, keys };
+    return { reason: b.reason, keys, keysTotal: typeof b.keysTotal === "number" ? b.keysTotal : undefined };
   } catch {
     return null;
   }
@@ -265,22 +265,24 @@ async function forward(
         return;
       }
       // §10: a 403 constraint_denied names its §11.1 reason; act on it, and pass the answer through unchanged.
+      // Every chunk is forwarded as it arrives; only the first MAX_REFUSAL_BODY bytes are kept for reading
+      // (Briefick: buffering then writing truncated a larger body under its original content-length).
       if (isCallAuth(auth) && pres.statusCode === 403) {
+        cres.writeHead(403, pres.headers);
         const chunks: Buffer[] = [];
         let size = 0;
         pres.on("data", (c: Buffer) => {
+          cres.write(c);
           size += c.length;
           if (size <= MAX_REFUSAL_BODY) chunks.push(c);
         });
         pres.on("end", () => {
-          const raw = Buffer.concat(chunks);
-          const refusal = size <= MAX_REFUSAL_BODY ? constraintDenial(raw) : null;
+          cres.end();
+          const refusal = size <= MAX_REFUSAL_BODY ? constraintDenial(Buffer.concat(chunks)) : null;
           if (refusal) {
             const action = constraintRefusalAction([refusal.reason]);
-            if (action) auth.refused?.(action, refusal.reason, refusal.keys);
+            if (action) auth.refused?.(action, refusal.reason, refusal.keys, refusal.keysTotal);
           }
-          cres.writeHead(403, pres.headers);
-          cres.end(raw);
         });
         return;
       }

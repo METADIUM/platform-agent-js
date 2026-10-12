@@ -238,6 +238,27 @@ describe("daemon with a /1 target", () => {
     expect(up.seen.length).toBe(1);
   });
 
+  /** A body past the read cap still reaches the client whole; only the reading stops (Briefick). */
+  it("passes a 403 body over 64 KiB through whole, without acting on it", async () => {
+    const big = JSON.stringify({ error: "constraint_denied", reason: "constraints_missing", pad: "x".repeat(64 * 1024) });
+    const up = await rp(() => ({ status: 403, body: big }));
+    const s = await session();
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+    const r = await fetch(`http://127.0.0.1:${daemon.port}/mcp`, { method: "POST", headers: { authorization: "Bearer t" }, body: "{}" });
+    expect(r.status).toBe(403);
+    expect((await r.text()).length, "the body was truncated").toBe(big.length);
+    expect(s.state(), "a body past the read cap was acted on").toMatchObject({ status: "active" });
+  });
+
+  it("names how many keys there were when keys is capped (keysTotal)", async () => {
+    const up = await rp(() => ({ status: 403, body: JSON.stringify({ error: "constraint_denied", reason: "constraints_unknown_key", keys: ["a", "b"], keysTotal: 5 }) }));
+    const s = await session();
+    daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: s }], token: "t" });
+    await post("/mcp");
+    const second = await post("/mcp");
+    expect(String(second.body.message)).toContain("a,b and 3 more");
+  });
+
   /** Only constraint_denied with a §11.1 code acts; other refusals keep the session (§10 insufficient_scope etc.). */
   it.each([
     ["insufficient_scope", JSON.stringify({ error: "insufficient_scope" })],

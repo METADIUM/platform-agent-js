@@ -14,7 +14,7 @@ export interface CallAuth {
   setClockOffset(seconds: number): void;
   state(): SessionState;
   /** The RP refused a call for the delegation's constraints (§10 `constraint_denied`, §11.1 `drop`/`keep`). */
-  refused?(action: ConstraintRefusalAction, reason: string, keys: string[]): void;
+  refused?(action: ConstraintRefusalAction, reason: string, keys: string[], keysTotal?: number): void;
 }
 
 export type SessionState =
@@ -25,7 +25,7 @@ export type SessionState =
   | { status: "retrying"; expiresAt?: string; lastError: string }
   | { status: "dropped"; error: string }
   /** §11.1 `keep`: the RP doesn't understand a limit. The VC stays; this process stops presenting it. */
-  | { status: "held"; reason: string; keys: string[] };
+  | { status: "held"; reason: string; keys: string[]; keysTotal?: number };
 
 /** No usable token: the daemon answers the MCP client locally (§9.1). */
 export class SessionUnavailable extends Error {
@@ -91,11 +91,11 @@ export class DelegationSessionAuth implements CallAuth {
   }
 
   /** §11.1: `drop` makes the VC unusable, as `invalid_delegation` does; `keep` holds it unpresented. Both stop refreshing. */
-  refused(action: ConstraintRefusalAction, reason: string, keys: string[]): void {
+  refused(action: ConstraintRefusalAction, reason: string, keys: string[], keysTotal?: number): void {
     this.stop();
     this.current = action === "drop"
       ? { status: "dropped", error: `constraint_denied: ${reason}` }
-      : { status: "held", reason, keys };
+      : { status: "held", reason, keys, ...(keysTotal !== undefined ? { keysTotal } : {}) };
   }
 
   async callHeaders(method: string, htu: string, body: Uint8Array): Promise<Record<string, string>> {
@@ -104,9 +104,11 @@ export class DelegationSessionAuth implements CallAuth {
       throw new SessionUnavailable("delegation_dropped", `the delegation was refused: ${this.current.error}`);
     }
     if (this.current.status === "held") {
-      const { reason, keys } = this.current;
+      const { reason, keys, keysTotal } = this.current;
+      // §10: keys is capped at 16; keysTotal says how many there were.
+      const more = keysTotal !== undefined && keysTotal > keys.length ? ` and ${keysTotal - keys.length} more` : "";
       throw new SessionUnavailable("delegation_held",
-        `the RP doesn't understand this delegation's constraints (${reason}${keys.length ? ": " + keys.join(",") : ""}); ` +
+        `the RP doesn't understand this delegation's constraints (${reason}${keys.length ? ": " + keys.join(",") + more : ""}); ` +
         "the delegation is kept and not presented again until the RP is updated or a new one is approved");
     }
     // Never past exp, and never extended here (§9.1).
