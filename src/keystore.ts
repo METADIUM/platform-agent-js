@@ -24,6 +24,8 @@ export interface KeyStore {
   credentials?: Record<string, string>;
   /** URL별, an RP refused this VC with §11.1 `keep`: not presented again while it is the stored one. */
   held?: Record<string, HeldCredential>;
+  /** URL별, digests of VCs an RP refused with §11.1 `drop`; pickup is repeatable and would hand them back. */
+  dropped?: Record<string, string[]>;
 }
 
 export interface HeldCredential {

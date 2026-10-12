@@ -137,3 +137,50 @@ describe("a /1 target picks up its delegation (spec §8 → §9 → §10)", () =
     closers.push(() => (s.target.auth as { stop?: () => void } | null)?.stop?.());
   });
 });
+
+describe("pickup follow-ups (minipaas, Briefick, metapass-saas on #48/#49)", () => {
+  async function store() {
+    const d = mkdtempSync(join(tmpdir(), "mpa-pick2-"));
+    closers.push(() => rmSync(d, { recursive: true, force: true }));
+    const s = openStore({ backend: "file", keyFile: join(d, "key.json") });
+    const key = await AgentKey.generate();
+    s.save({ privateJwk: key.exportPrivateJwk() });
+    return { s, key };
+  }
+
+  it("a restart doesn't re-adopt a VC dropped before it (persisted digest)", async () => {
+    const { vcDigest } = await import("../src/cli.js");
+    const { s, key } = await store();
+    const old = vc("dropped-before-restart");
+    const fresh = vc("next");
+    s.save({ ...s.load()!, dropped: { "https://rp": [vcDigest(old)] } });
+    const answers: PickupResult[] = [
+      { ok: true, delegations: [{ delegationId: "old", credential: old, scope: [], exp: 9 }] },
+      { ok: true, delegations: [{ delegationId: "old", credential: old, scope: [], exp: 9 }, { delegationId: "new", credential: fresh, scope: [], exp: 1 }] },
+    ];
+    const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
+    // The verifier is unreachable on purpose: only which VC was adopted matters here.
+    const auth = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
+      pickup: async () => answers.shift()!, sleep: async () => {},
+    });
+    closers.push(() => auth?.stop());
+    expect(answers.length, "the dropped VC was adopted on the first pickup").toBe(0);
+    expect(s.load()!.credentials?.["https://rp"]).toBe(fresh);
+  });
+
+  it("an RP without §8 (pickup 404) stops polling and says credentials import", async () => {
+    const key = await AgentKey.generate();
+    const url = await server((_q, _b, res) => { res.writeHead(404); res.end("not found"); });
+    expect(await pickup({ url, key })).toEqual({ ok: false, error: "no_pickup" });
+    const { s } = await store();
+    let calls = 0;
+    const target: DaemonTarget = { alias: "b", targetMcpUrl: url + "/api/mcp", auth: null };
+    const auth = await connectV1Target(target, s.load()!, { alias: "b", url, verifierUrl: url }, s, key, {
+      pickup: async () => { calls++; return pickup({ url, key }); },
+      sleep: async () => { throw new Error("it kept polling after a 404"); },
+    });
+    expect(auth).toBeNull();
+    expect(calls).toBe(1);
+    expect(target.pendingReason).toContain("credentials import");
+  });
+});

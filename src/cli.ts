@@ -8,6 +8,7 @@
  * 키는 `~/.metapass-agent/key.json`에 영속 → **최초 1회만 등록, 이후 재사용**. `--url`/`--code`는
  * 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
  */
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MINISIGN_PUBLIC_KEYS } from "./release-key.js";
@@ -245,6 +246,7 @@ export function updateStore(store: AgentStore, data: KeyStore, change: (fresh: K
   data.credentials = fresh.credentials;
   data.registrations = fresh.registrations;
   data.held = fresh.held;
+  data.dropped = fresh.dropped;
 }
 
 /** 캐시된 위임 VC 삭제. 있었으면 true. With `only`, deletes it only while it is still that VC. */
@@ -286,9 +288,11 @@ export async function recoverSessionFailure(
   url: string,
   store: AgentStore,
   key: AgentKey,
+  /** The VC that was presented, when the caller knows it; else the one in memory now. */
+  presented?: string,
 ): Promise<string | null> {
   if (!(e instanceof AgentClientError)) return null;
-  const refused = data.credentials?.[url];
+  const refused = presented ?? data.credentials?.[url];
   if (e.httpStatus === 401) {
     throw new AgentClientError(registerGuide(e, url), e.httpStatus, e.body);
   }
@@ -530,7 +534,7 @@ export async function connectTarget(
       try {
         await auth.start();
       } catch (e) {
-        const fresh = await recoverSessionFailure(e, client, data, rp.url, store, key).catch((r: unknown) => {
+        const fresh = await recoverSessionFailure(e, client, data, rp.url, store, key, credential).catch((r: unknown) => {
           if (r instanceof DelegationHeldError) target.heldCredential = credential;
           throw r;
         });
@@ -565,19 +569,27 @@ export interface V1Deps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** VCs an RP refused with §11.1 `drop`, per RP: pickup is repeatable and would hand them back (in memory only). */
-const droppedVcs = new Map<string, Set<string>>();
+/** How many dropped-VC digests are kept per RP (oldest go first). */
+const DROPPED_KEPT = 20;
 
-/** §8: poll pickup at the RP's interval until a live delegation arrives, store it, and return it. */
-async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, store: AgentStore, deps: Required<V1Deps>): Promise<string> {
+export function vcDigest(vc: string): string {
+  return createHash("sha256").update(vc, "utf8").digest("base64url");
+}
+
+/**
+ * §8: poll pickup at the RP's interval until a live delegation arrives, store it, and return it. Null when the RP
+ * has no §8 pickup (404): polling it would never succeed, so the VC has to come by `credentials import`.
+ */
+async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, store: AgentStore, deps: Required<V1Deps>): Promise<string | null> {
   let interval = DEFAULT_POLL_INTERVAL_S;
   for (;;) {
     let reason: string;
     try {
       const r = await deps.pickup();
       if (r.ok) {
-        const dropped = droppedVcs.get(rp.url);
-        const d = latest(r.delegations.filter((x) => !dropped?.has(x.credential)));
+        // Persisted, so a restart doesn't re-adopt a VC this agent already saw refused (minipaas, Briefick).
+        const dropped = new Set((store.load() ?? data).dropped?.[rp.url] ?? []);
+        const d = latest(r.delegations.filter((x) => !dropped.has(vcDigest(x.credential))));
         if (d) {
           const fresh = store.load() ?? data;
           fresh.credentials = { ...(fresh.credentials ?? {}), [rp.url]: d.credential };
@@ -587,6 +599,10 @@ async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, st
           return d.credential;
         }
         reason = "위임 대기 — 지갑에서 승인하면 자동으로 받습니다";
+      } else if (r.error === "no_pickup") {
+        target.pendingReason = `이 RP는 §8 회수를 지원하지 않습니다 — credentials import --url ${rp.url} <파일>`;
+        console.error(`[${rp.alias}] ${target.pendingReason}`);
+        return null;
       } else {
         if (r.interval) interval = Math.max(interval, r.interval);
         reason = pickupMessage(r, rp.url);
@@ -614,10 +630,12 @@ export async function connectV1Target(
       target.pendingReason = `위임 VC 없음 — credentials import --url ${rp.url} <파일>`;
       return null;
     }
-    credential = await waitPickup(target, data, rp, store, {
+    const picked = await waitPickup(target, data, rp, store, {
       pickup: deps.pickup,
       sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     });
+    if (!picked) return null;
+    credential = picked;
   }
   const held = data.held?.[rp.url];
   if (held?.credential === credential) {
@@ -629,11 +647,20 @@ export async function connectV1Target(
   // Re-read before writing: `credentials import`/`unhold` may have changed the store since `up` (metapass-saas).
   const persistStopped = (s: Extract<SessionState, { status: "dropped" | "held" }>): void => {
     const fresh = store.load();
-    if (!fresh || fresh.credentials?.[rp.url] !== vc) return;
+    if (!fresh) return;
+    if (s.status === "dropped") {
+      // Remembered even when a newer VC is stored now: this one was refused, and pickup would hand it back.
+      const seen = (fresh.dropped?.[rp.url] ?? []).filter((d) => d !== vcDigest(vc));
+      fresh.dropped = { ...(fresh.dropped ?? {}), [rp.url]: [...seen, vcDigest(vc)].slice(-DROPPED_KEPT) };
+      data.dropped = fresh.dropped;
+    }
+    if (fresh.credentials?.[rp.url] !== vc) {
+      if (s.status === "dropped") store.save(fresh);
+      return;
+    }
     if (s.status === "dropped") {
       const { [rp.url]: _gone, ...rest } = fresh.credentials;
       fresh.credentials = rest;
-      droppedVcs.set(rp.url, (droppedVcs.get(rp.url) ?? new Set()).add(vc));
       console.error(`[${rp.alias}] 위임 폐기(${s.error}) — 저장된 VC 삭제, 새 위임 필요`);
     } else {
       const { status: _s, ...h } = s;
@@ -886,8 +913,7 @@ export async function main(argv: string[]): Promise<number> {
     if (!args.code) return fail("--code (또는 PAIRING_CODE) 필요 — Briefick 에이전트 페이지의 페어링 코드");
     const client = agentClient(args.url, key);
     await client.register(args.code, registerLabel(args));
-    data.registrations = { ...(data.registrations ?? {}), [args.url]: true };
-    store.save(data);
+    updateStore(store, data, (s) => { s.registrations = { ...(s.registrations ?? {}), [args.url!]: true }; });
     console.log(
       `✅ 등록 완료.\n  DID: ${key.did}\n  지문: ${key.fingerprint} (에이전트 페이지 표시와 대조)\n  키 저장: ${store.location} — 이후 재실행 시 재사용(재등록 불필요)${
         created ? "" : "\n  (기존 키 재사용)"
@@ -990,8 +1016,7 @@ export async function main(argv: string[]): Promise<number> {
       if (!args.code) return fail("--code 필요(최초 페어링) — RP의 에이전트 등록 화면에서 발급");
       const client = agentClient(url, key);
       await client.register(args.code, registerLabel(args));
-      data.registrations = { ...(data.registrations ?? {}), [url]: true };
-      store.save(data);
+      updateStore(store, data, (s) => { s.registrations = { ...(s.registrations ?? {}), [url]: true }; });
     }
     const v1 = args.verifier
       ? { verifierUrl: args.verifier.replace(/\/+$/, ""), verifierRp: args.verifierRp ?? alias }
