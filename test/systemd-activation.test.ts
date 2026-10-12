@@ -48,3 +48,21 @@ describe("a key store that can't be read stops the service instead of looping (m
     expect(systemdUnit(["/bin/agent", "up"])).toContain("Restart=on-failure");
   });
 });
+
+describe("a keychain tool failure is retried, bad content parks (metapass-saas, #50)", async () => {
+  const { exitCodeFor } = await import("../src/cli.js");
+  const { loadKeychainStore } = await import("../src/keystore.js");
+  const fail = (status: number, stdout = "", stderr = "") => () => ({ status, stdout, stderr });
+
+  it("a locked keychain or no D-Bus exits 1, so the unit restarts and tries again", () => {
+    const locked = (() => { try { loadKeychainStore({ exec: fail(36, "", "locked"), platform: "darwin" }); } catch (e) { return e; } })();
+    const noBus = (() => { try { loadKeychainStore({ exec: fail(1, "", "Cannot autolaunch D-Bus"), platform: "linux" }); } catch (e) { return e; } })();
+    expect(exitCodeFor(locked), "a locked keychain parked the service").toBe(1);
+    expect(exitCodeFor(noBus), "D-Bus not up at boot parked the service").toBe(1);
+  });
+
+  it("a keychain item that isn't a key store still parks", () => {
+    const garbage = (() => { try { loadKeychainStore({ exec: fail(0, "not json"), platform: "darwin" }); } catch (e) { return e; } })();
+    expect(exitCodeFor(garbage)).toBe(78);
+  });
+});

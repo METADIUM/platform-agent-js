@@ -1349,7 +1349,8 @@ function isSeaBinary(): boolean {
 
 /** A store that can't be read won't read on a restart either: EX_CONFIG, which the service unit doesn't restart. */
 export function exitCodeFor(e: unknown): number {
-  return e instanceof KeyStoreUnreadable ? EXIT_CONFIG : 1;
+  // A tool failure (locked keychain, D-Bus not up yet) may pass on a restart; only bad content parks the unit.
+  return e instanceof KeyStoreUnreadable && !e.retryable ? EXIT_CONFIG : 1;
 }
 
 // `node dist/cli.js` 직접 실행 지원(bin/cli.mjs와 동일 동작) — 이전엔 무동작 exit 0이라 디버깅에 혼란.
