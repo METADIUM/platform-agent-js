@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connectV1Target, main, sessionLine } from "../src/cli.js";
 import { startDaemon, type DaemonTarget, type RunningDaemon } from "../src/daemon.js";
-import { loadConfig } from "../src/config.js";
+import { loadConfig, saveConfig } from "../src/config.js";
 import { AgentKey } from "../src/key.js";
 import { openStore } from "../src/keystore.js";
 
@@ -135,6 +135,35 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     writeFileSync(file, vc() + "\n");
     expect(await main(["credentials", "import", "--url", url + "/", file, "--key-file", keyFile])).toBe(0);
     expect(openStore({ backend: "file", keyFile }).load()!.credentials?.[url]).toBe(vc());
+  });
+
+  it("add --verifier won't silently convert a v0 RP; --force does (Briefick)", async () => {
+    const keyFile = tmpKeyFile();
+    const dir = join(keyFile, "..");
+    const url = "https://briefick.example.com";
+    saveConfig(dir, { rps: [{ alias: "briefick", url }] });
+    expect(await main(["add", url, "--verifier", "https://sso.example.com", "--key-file", keyFile])).toBe(1);
+    expect(loadConfig(dir).rps, "a refused conversion still changed the config").toEqual([{ alias: "briefick", url }]);
+    expect(await main(["add", url, "--verifier", "https://sso.example.com", "--force", "--key-file", keyFile])).toBe(0);
+    expect(loadConfig(dir).rps[0]).toMatchObject({ verifierUrl: "https://sso.example.com" });
+  });
+
+  it("a store that can't be written doesn't reject the connect when the exchange drops the VC (Briefick)", async () => {
+    const keyFile = tmpKeyFile();
+    const key = await AgentKey.generate();
+    const store = openStore({ backend: "file", keyFile });
+    const v = await server((path, _b, res) => {
+      const [status, body] = path === "/agent/nonce" ? [200, { c_nonce: "n" }] : [400, { error: "invalid_delegation" }];
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    });
+    const url = "https://minipaas.example.com";
+    store.save({ privateJwk: key.exportPrivateJwk(), credentials: { [url]: vc() } });
+    const broken = { ...store, save: () => { throw new Error("disk full"); } };
+    const target: DaemonTarget = { alias: "minipaas", targetMcpUrl: url + "/api/mcp", auth: null };
+    const auth = await connectV1Target(target, store.load()!, { alias: "minipaas", url, verifierUrl: v.url }, broken, key);
+    closers.push(() => auth?.stop());
+    expect(auth?.state()).toMatchObject({ status: "dropped" });
   });
 
   it("import refuses a file that isn't an SD-JWT VC", async () => {

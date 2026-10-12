@@ -553,23 +553,34 @@ export async function connectV1Target(
     target.pendingReason = heldMessage(held);
     return null;
   }
+  const vc: string = credential;
+  // Persisted, so a restart doesn't present a refused VC again (§11.1).
+  const persistStopped = (s: Extract<SessionState, { status: "dropped" | "held" }>): void => {
+    const creds = data.credentials ?? {};
+    if (creds[rp.url] !== vc) return;
+    if (s.status === "dropped") {
+      const { [rp.url]: _gone, ...rest } = creds;
+      data.credentials = rest;
+      console.error(`[${rp.alias}] 위임 폐기(${s.error}) — 저장된 VC 삭제, 새 위임 필요`);
+    } else {
+      const { status: _s, ...h } = s;
+      const record = { credential: vc, ...h };
+      data.held = { ...(data.held ?? {}), [rp.url]: record };
+      console.error(`[${rp.alias}] ${heldMessage(record)}`);
+    }
+    store.save(data);
+  };
   const auth = new DelegationSessionAuth({
     key,
     verifier: rp.verifierUrl,
-    exchange: () => exchangeSessionToken({ verifierUrl: rp.verifierUrl, vc: credential, rp: rp.verifierRp ?? rp.alias, key }),
+    exchange: () => exchangeSessionToken({ verifierUrl: rp.verifierUrl, vc, rp: rp.verifierRp ?? rp.alias, key }),
     onStopped: (s) => {
-      // Persisted, so a restart doesn't present a refused VC again (§11.1).
-      if (data.credentials?.[rp.url] !== credential) return;
-      if (s.status === "dropped") {
-        const { [rp.url]: _gone, ...rest } = data.credentials;
-        data.credentials = rest;
-        console.error(`[${rp.alias}] 위임 폐기(${s.error}) — 저장된 VC 삭제, 새 위임 필요`);
-      } else {
-        const { status: _s, ...h } = s;
-        data.held = { ...(data.held ?? {}), [rp.url]: { credential, ...h } };
-        console.error(`[${rp.alias}] ${heldMessage(data.held[rp.url])}`);
+      try {
+        persistStopped(s);
+      } catch (e) {
+        // Thrown from the session's callback, this would end the daemon (Briefick).
+        console.error(`[${rp.alias}] 위임 상태 저장 실패: ${e instanceof Error ? e.message : String(e)}`);
       }
-      store.save(data);
     },
   });
   target.auth = auth;
@@ -915,6 +926,10 @@ export async function main(argv: string[]): Promise<number> {
       cfg.rps.push({ alias, url, ...(args.mcpPath ? { mcpPath: args.mcpPath } : {}), ...v1 } satisfies DaemonRp);
       saveConfig(dir, cfg);
     } else if (args.verifier) {
+      // Converting a v0 RP stops its pairing-based connect loop; never do that by accident (Briefick).
+      if (!existing.verifierUrl && !args.force) {
+        return fail(`'${alias}' 는 v0 RP 입니다 — /1 로 바꾸려면 --force (되돌리기: remove ${alias} 후 add --code)`);
+      }
       Object.assign(existing, v1);
       saveConfig(dir, cfg);
     }
@@ -1089,7 +1104,10 @@ export async function main(argv: string[]): Promise<number> {
       };
       targets.push(target);
       if (rp.verifierUrl) {
-        void connectV1Target(target, data, { ...rp, verifierUrl: rp.verifierUrl }, store, key);
+        connectV1Target(target, data, { ...rp, verifierUrl: rp.verifierUrl }, store, key).catch((e: unknown) => {
+          target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
+          console.error(`[${rp.alias}] ${target.pendingReason}`);
+        });
         continue;
       }
       const client = agentClient(rp.url, key);
