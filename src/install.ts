@@ -130,17 +130,7 @@ export function install(logFile: string): InstallResult {
     }
     const unitDir = join(homedir(), ".config", "systemd", "user");
     const unitPath = join(unitDir, SYSTEMD_UNIT);
-    const unit = `[Unit]
-Description=metapass agent proxy daemon (doc26)
-
-[Service]
-ExecStart=${args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ")}
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-`;
+    const unit = systemdUnit(args);
     mkdirSync(unitDir, { recursive: true });
     writeFileSync(unitPath, unit);
     for (const argv of systemdActivation()) {
@@ -197,4 +187,25 @@ export function uninstall(): string[] {
     return done;
   }
   throw new Error(`지원하지 않는 플랫폼: ${process.platform}`);
+}
+
+/**
+ * Exit code for a fault a restart can't fix (an unreadable key store): EX_CONFIG. The unit doesn't restart on it,
+ * so a corrupt store stops the service instead of looping every RestartSec (metapass-saas, #47).
+ */
+export const EXIT_CONFIG = 78;
+
+export function systemdUnit(args: string[]): string {
+  return `[Unit]
+Description=metapass agent proxy daemon (doc26)
+
+[Service]
+ExecStart=${args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ")}
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=${EXIT_CONFIG}
+
+[Install]
+WantedBy=default.target
+`;
 }

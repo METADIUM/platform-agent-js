@@ -25,13 +25,13 @@ import { exchangeSessionToken } from "./session.js";
 import { DEFAULT_POLL_INTERVAL_S, latest, pickup, pickupMessage, type PickupResult } from "./pickup.js";
 import { constraintRefusalAction } from "./constraint-refusal.js";
 import { startProxy, type BearerSource } from "./proxy.js";
-import { defaultKeyFile, loadStore, openStore, type AgentStore, type DroppedVc, type KeyStore } from "./keystore.js";
+import { defaultKeyFile, KeyStoreUnreadable, loadStore, openStore, type AgentStore, type DroppedVc, type KeyStore } from "./keystore.js";
 import {
   aliasFromUrl, configDir, ensureToken, loadConfig, mcpAddCommand, rotateToken, saveConfig,
   type DaemonConfig, type DaemonRp,
 } from "./config.js";
 import { startDaemon, type DaemonTarget } from "./daemon.js";
-import { install as installUnit, uninstall as uninstallUnit } from "./install.js";
+import { EXIT_CONFIG, install as installUnit, uninstall as uninstallUnit } from "./install.js";
 
 interface Args {
   /** 등록 시 서버에 보내는 표시 이름. 미지정이면 호스트 이름. */
@@ -134,14 +134,18 @@ function parse(argv: string[]): Args {
 
 /** 저장소 오픈 — keychain 백엔드가 비어 있고 기존 key.json이 있으면 최초 1회 이관. */
 function openAgentStore(args: Args): AgentStore {
-  const store = openStore({ backend: args.keyBackend, keyFile: args.keyFile });
+  return migrateLegacyKeyFile(openStore({ backend: args.keyBackend, keyFile: args.keyFile }), args.keyFile);
+}
+
+/** An empty keychain takes the legacy key.json once. An unreadable key.json throws: it is never "no key". */
+export function migrateLegacyKeyFile(store: AgentStore, keyFile: string): AgentStore {
   if (store.backend === "keychain" && !store.load()) {
-    const legacy = loadStore(args.keyFile);
+    const legacy = loadStore(keyFile);
     if (legacy) {
       store.save(legacy);
       console.error(
-        `기존 키 파일을 키체인으로 가져왔습니다: ${args.keyFile} → ${store.location}\n` +
-          `  평문 파일 삭제 권장: rm "${args.keyFile}"`,
+        `기존 키 파일을 키체인으로 가져왔습니다: ${keyFile} → ${store.location}\n` +
+          `  평문 파일 삭제 권장: rm "${keyFile}"`,
       );
     }
   }
@@ -1472,6 +1476,12 @@ function isSeaBinary(): boolean {
   }
 }
 
+/** A store that can't be read won't read on a restart either: EX_CONFIG, which the service unit doesn't restart. */
+export function exitCodeFor(e: unknown): number {
+  // A tool failure (locked keychain, D-Bus not up yet) may pass on a restart; only bad content parks the unit.
+  return e instanceof KeyStoreUnreadable && !e.retryable ? EXIT_CONFIG : 1;
+}
+
 // `node dist/cli.js` 직접 실행 지원(bin/cli.mjs와 동일 동작) — 이전엔 무동작 exit 0이라 디버깅에 혼란.
 const directEntry = process.argv[1];
 if (isSeaBinary() || (directEntry && import.meta.url === pathToFileURL(directEntry).href)) {
@@ -1479,6 +1489,6 @@ if (isSeaBinary() || (directEntry && import.meta.url === pathToFileURL(directEnt
     .then((code) => process.exit(code ?? 0))
     .catch((e) => {
       console.error("오류: " + (e instanceof Error ? e.message : String(e)));
-      process.exit(1);
+      process.exit(exitCodeFor(e));
     });
 }

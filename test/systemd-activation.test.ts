@@ -29,3 +29,40 @@ describe("making a freshly installed binary the running process (Linux)", () => 
     expect(flat().some((c) => c.startsWith("--user enable "))).toBe(true);
   });
 });
+
+describe("a key store that can't be read stops the service instead of looping (metapass-saas, #47)", async () => {
+  const { EXIT_CONFIG, systemdUnit } = await import("../src/install.js");
+  const { exitCodeFor } = await import("../src/cli.js");
+  const { KeyStoreUnreadable } = await import("../src/keystore.js");
+
+  it("the CLI exits with the code the unit doesn't restart on", () => {
+    const code = exitCodeFor(new KeyStoreUnreadable("x"));
+    expect(code).not.toBe(1);
+    expect(systemdUnit(["/bin/agent", "up"]), "the unit restarts on the unreadable-store exit")
+      .toContain(`RestartPreventExitStatus=${code}`);
+    expect(code).toBe(EXIT_CONFIG);
+  });
+
+  it("other failures still exit 1, which the unit restarts on", () => {
+    expect(exitCodeFor(new Error("network"))).toBe(1);
+    expect(systemdUnit(["/bin/agent", "up"])).toContain("Restart=on-failure");
+  });
+});
+
+describe("a keychain tool failure is retried, bad content parks (metapass-saas, #50)", async () => {
+  const { exitCodeFor } = await import("../src/cli.js");
+  const { loadKeychainStore } = await import("../src/keystore.js");
+  const fail = (status: number, stdout = "", stderr = "") => () => ({ status, stdout, stderr });
+
+  it("a locked keychain or no D-Bus exits 1, so the unit restarts and tries again", () => {
+    const locked = (() => { try { loadKeychainStore({ exec: fail(36, "", "locked"), platform: "darwin" }); } catch (e) { return e; } })();
+    const noBus = (() => { try { loadKeychainStore({ exec: fail(1, "", "Cannot autolaunch D-Bus"), platform: "linux" }); } catch (e) { return e; } })();
+    expect(exitCodeFor(locked), "a locked keychain parked the service").toBe(1);
+    expect(exitCodeFor(noBus), "D-Bus not up at boot parked the service").toBe(1);
+  });
+
+  it("a keychain item that isn't a key store still parks", () => {
+    const garbage = (() => { try { loadKeychainStore({ exec: fail(0, "not json"), platform: "darwin" }); } catch (e) { return e; } })();
+    expect(exitCodeFor(garbage)).toBe(78);
+  });
+});

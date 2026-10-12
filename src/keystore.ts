@@ -59,7 +59,12 @@ function assertOwnerOnly(file: string): void {
 }
 
 /** A store that exists but can't be read. Never answered with a new key: that would replace the agent's identity. */
-export class KeyStoreUnreadable extends Error {}
+export class KeyStoreUnreadable extends Error {
+  /** The store's tool failed (a locked keychain, no D-Bus yet at boot), not its content: a later try may succeed. */
+  constructor(message: string, readonly retryable = false) {
+    super(message);
+  }
+}
 
 function parseStore(raw: string, where: string): KeyStore {
   let s: unknown;
@@ -72,10 +77,11 @@ function parseStore(raw: string, where: string): KeyStore {
   return s as KeyStore;
 }
 
-function unreadable(where: string, why: string): KeyStoreUnreadable {
+function unreadable(where: string, why: string, retryable = false): KeyStoreUnreadable {
   return new KeyStoreUnreadable(
     `키 저장소를 읽을 수 없습니다(${where}): ${why}. 새 키를 만들지 않습니다 — 에이전트 신원과 위임이 사라집니다. ` +
       "백업에서 복구하거나, 새 에이전트로 시작하려면 그 항목을 치운 뒤 다시 실행하세요",
+    retryable,
   );
 }
 
@@ -166,7 +172,7 @@ export function loadKeychainStore(opts: KeychainOptions = {}): KeyStore | null {
   // A locked or denied keychain (36, 128, …) must not read as "no key", or a new key would replace it (metapass-saas).
   const notFound = platform === "darwin" ? r.status === 44 : r.status === 1 && !r.stderr.trim();
   if (notFound) return null;
-  if (r.status !== 0) throw unreadable(`${cmd} exit ${r.status}`, r.stderr.trim() || "키체인 오류");
+  if (r.status !== 0) throw unreadable(`${cmd} exit ${r.status}`, r.stderr.trim() || "키체인 오류", true);
   return parseStore(r.stdout.trim(), cmd);
 }
 
