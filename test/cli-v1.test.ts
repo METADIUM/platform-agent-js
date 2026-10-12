@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import http from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -115,6 +115,30 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
 
     expect(await main(["credentials", "unhold", "--url", s.rp.url, "--key-file", (s.store.location)])).toBe(0);
     expect((await connect(s)).auth, "unhold didn't release the VC").not.toBeNull();
+  });
+
+  it.each(["constraints_missing", "constraints_unknown_key"])(
+    "a VC imported while the daemon runs survives a %s refusal of the old one (metapass-saas F1)", async (reason) => {
+      const s = await setup(reason, ["k"]);
+      const target = await connect(s);
+      const fresh = vc("new");
+      s.store.save({ ...s.store.load()!, credentials: { [s.rp.url]: fresh } });
+      expect(await call(target)).toBe(403);
+      const after = s.store.load()!;
+      expect(after.credentials?.[s.rp.url], "the refusal of the old VC clobbered the imported one").toBe(fresh);
+      expect(after.held?.[s.rp.url], "the imported VC was marked held").toBeUndefined();
+    });
+
+  it("status shows a held delegation even when the daemon is stopped (metapass-saas F5)", async () => {
+    const s = await setup("constraints_unknown_key", ["maxAmount"]);
+    const keyFile = s.store.location;
+    saveConfig(join(keyFile, ".."), { rps: [{ alias: "minipaas", url: s.rp.url, verifierUrl: s.rp.verifierUrl }] });
+    s.store.save({ ...s.store.load()!, held: { [s.rp.url]: { credential: s.credential, reason: "constraints_unknown_key", keys: ["maxAmount"] } } });
+    const out: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a) => void out.push(a.join(" ")));
+    closers.push(() => spy.mockRestore());
+    expect(await main(["status", "--port", "1", "--key-file", keyFile])).toBe(0);
+    expect(out.join("\n")).toContain("위임 보류(constraints_unknown_key: maxAmount)");
   });
 
   it("a held record for an older VC doesn't hold a newly imported one", async () => {

@@ -555,20 +555,23 @@ export async function connectV1Target(
   }
   const vc: string = credential;
   // Persisted, so a restart doesn't present a refused VC again (§11.1).
+  // Re-read before writing: `credentials import`/`unhold` may have changed the store since `up` (metapass-saas).
   const persistStopped = (s: Extract<SessionState, { status: "dropped" | "held" }>): void => {
-    const creds = data.credentials ?? {};
-    if (creds[rp.url] !== vc) return;
+    const fresh = store.load();
+    if (!fresh || fresh.credentials?.[rp.url] !== vc) return;
     if (s.status === "dropped") {
-      const { [rp.url]: _gone, ...rest } = creds;
-      data.credentials = rest;
+      const { [rp.url]: _gone, ...rest } = fresh.credentials;
+      fresh.credentials = rest;
       console.error(`[${rp.alias}] 위임 폐기(${s.error}) — 저장된 VC 삭제, 새 위임 필요`);
     } else {
       const { status: _s, ...h } = s;
       const record = { credential: vc, ...h };
-      data.held = { ...(data.held ?? {}), [rp.url]: record };
+      fresh.held = { ...(fresh.held ?? {}), [rp.url]: record };
       console.error(`[${rp.alias}] ${heldMessage(record)}`);
     }
-    store.save(data);
+    store.save(fresh);
+    data.credentials = fresh.credentials;
+    data.held = fresh.held;
   };
   const auth = new DelegationSessionAuth({
     key,
@@ -1004,6 +1007,8 @@ export async function main(argv: string[]): Promise<number> {
             : (leftMs < 24 * 3600_000 ? "⚠ 위임 만료 임박 " : "✓ 위임 유효 ") + `(${formatLeft(leftMs)} 남음)`;
         }
       }
+      const held = data?.held?.[rp.url];
+      if (cred && held?.credential === cred) deleg = `⏸ ${heldMessage(held)}`;
       console.log(`  ${rp.alias.padEnd(10)} ${deleg}`);
       const sess = sessionLine(sessions?.find((t) => t.alias === rp.alias));
       if (sess) console.log(`  ${"".padEnd(10)} ${sess}`);
