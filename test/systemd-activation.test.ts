@@ -66,3 +66,13 @@ describe("a keychain tool failure is retried, bad content parks (metapass-saas, 
     expect(exitCodeFor(garbage)).toBe(78);
   });
 });
+
+describe("launchd throttles restarts (Briefick, #50)", async () => {
+  const { launchdPlist, LAUNCHD_THROTTLE_SECONDS } = await import("../src/install.js");
+  it("ThrottleInterval is set, at least a minute", () => {
+    const m = /<key>ThrottleInterval<\/key><integer>(\d+)<\/integer>/.exec(launchdPlist(["/bin/agent", "up"], "/tmp/l"));
+    expect(m, "the plist has no ThrottleInterval (launchd defaults to 10 s)").not.toBeNull();
+    expect(Number(m![1])).toBe(LAUNCHD_THROTTLE_SECONDS);
+    expect(LAUNCHD_THROTTLE_SECONDS).toBeGreaterThanOrEqual(60);
+  });
+});

@@ -594,6 +594,17 @@ function liveDropped(list: KeyStore["dropped"], url: string, nowS: number): Drop
   return (list?.[url] ?? []).filter((d) => d.exp === null || d.exp > nowS);
 }
 
+/** Entries with no readable `exp` can't expire, so only the newest of them are kept (Briefick, minipaas on #51). */
+export const DROPPED_WITHOUT_EXP_KEPT = 20;
+
+/** `list` with `entry` added for `url`: expired entries gone, `entry` last, and a cap on the ones that never expire. */
+function withDropped(list: KeyStore["dropped"], url: string, entry: DroppedVc, nowS: number): KeyStore["dropped"] {
+  const others = liveDropped(list, url, nowS).filter((d) => d.digest !== entry.digest);
+  const noExp = others.filter((d) => d.exp === null).slice(-(DROPPED_WITHOUT_EXP_KEPT - (entry.exp === null ? 1 : 0)));
+  const kept = others.filter((d) => d.exp !== null || noExp.includes(d));
+  return { ...(list ?? {}), [url]: [...kept, entry] };
+}
+
 function isDropped(store: AgentStore, data: KeyStore, url: string, vc: string): boolean {
   const digest = vcDigest(vc);
   const nowS = Date.now() / 1000;
@@ -683,19 +694,23 @@ export async function connectV1Target(
   // Persisted, so a restart doesn't present a refused VC again (§11.1).
   // Re-read before writing: `credentials import`/`unhold` may have changed the store since `up` (metapass-saas).
   const persistStopped = (s: Extract<SessionState, { status: "dropped" | "held" }>): void => {
-    const fresh = store.load();
-    if (!fresh) return;
+    const entry = { digest: vcDigest(vc), exp: vcExp(vc) };
+    const nowS = Date.now() / 1000;
     if (s.status === "dropped") {
-      // Remembered even when a newer VC is stored now: this one was refused, and pickup would hand it back.
-      const nowS = Date.now() / 1000;
-      const seen = liveDropped(fresh.dropped, rp.url, nowS).filter((d) => d.digest !== vcDigest(vc));
-      fresh.dropped = { ...(fresh.dropped ?? {}), [rp.url]: [...seen, { digest: vcDigest(vc), exp: vcExp(vc) }] };
-      data.dropped = fresh.dropped;
-      // Out of memory too, whatever the store holds now: the reconnect below must not present it again (B1).
+      // Memory first, before reading the store: if the store can't be read, the reconnect still must not present
+      // this VC again (metapass-saas on #51: it came back once a minute).
+      data.dropped = withDropped(data.dropped, rp.url, entry, nowS);
       if (data.credentials?.[rp.url] === vc) {
         const { [rp.url]: _mem, ...restMem } = data.credentials;
         data.credentials = restMem;
       }
+    }
+    const fresh = store.load();
+    if (!fresh) return;
+    if (s.status === "dropped") {
+      // Remembered even when a newer VC is stored now: this one was refused, and pickup would hand it back.
+      fresh.dropped = withDropped(fresh.dropped, rp.url, entry, nowS);
+      data.dropped = fresh.dropped;
     }
     if (fresh.credentials?.[rp.url] !== vc) {
       if (s.status === "dropped") store.save(fresh);
