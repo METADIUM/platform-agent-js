@@ -8,6 +8,13 @@ import { startDaemon, type DaemonTarget, type RunningDaemon } from "../src/daemo
 import { loadConfig, saveConfig } from "../src/config.js";
 import { AgentKey } from "../src/key.js";
 import { openStore } from "../src/keystore.js";
+import { slotKey } from "../src/routes.js";
+import type { DelegationSessionAuth } from "../src/delegation-session.js";
+
+/** The test VC has no scope, so it is served on the `default` route (§15). */
+const slot = (url: string) => slotKey(url, "default");
+const routeOf = (t: DaemonTarget) => t.routes?.get("default");
+const authOf = (t: DaemonTarget) => (routeOf(t)?.auth ?? null) as DelegationSessionAuth | null;
 
 const closers: Array<() => unknown> = [];
 afterEach(async () => {
@@ -72,8 +79,8 @@ async function setup(reason: string, keys?: string[]) {
 async function connect(s: Awaited<ReturnType<typeof setup>>) {
   const data = s.store.load()!;
   const target: DaemonTarget = { alias: "minipaas", targetMcpUrl: s.rp.url + "/api/mcp", auth: null };
-  const auth = await connectV1Target(target, data, s.rp, s.store, s.key);
-  if (auth) closers.push(() => auth.stop());
+  const rp = await connectV1Target(target, data, s.rp, s.store, s.key);
+  closers.push(() => rp.stop());
   return target;
 }
 
@@ -92,11 +99,11 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     const s = await setup("constraints_missing");
     const target = await connect(s);
     expect(await call(target)).toBe(403);
-    expect(s.store.load()!.credentials?.[s.rp.url], "the dropped VC is still stored").toBeUndefined();
+    expect(s.store.load()!.credentials?.[slot(s.rp.url)], "the dropped VC is still stored").toBeUndefined();
 
     const tokenCalls = s.v.hits.filter((h) => h === "/agent/token").length;
     const again = await connect(s);
-    expect(again.auth, "a restart presented a dropped VC").toBeNull();
+    expect(again.routes?.size, "a restart presented a dropped VC").toBe(0);
     expect(again.pendingReason).toContain("credentials import");
     expect(s.v.hits.filter((h) => h === "/agent/token").length, "a restart exchanged a dropped VC").toBe(tokenCalls);
   });
@@ -106,15 +113,15 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     const target = await connect(s);
     expect(await call(target)).toBe(403);
     const data = s.store.load()!;
-    expect(data.credentials?.[s.rp.url], "keep deleted the VC").toBe(s.credential);
-    expect(data.held?.[s.rp.url]).toEqual({ credential: s.credential, reason: "constraints_unknown_key", keys: ["maxAmount"] });
+    expect(data.credentials?.[slot(s.rp.url)], "keep deleted the VC").toBe(s.credential);
+    expect(data.held?.[slot(s.rp.url)]).toEqual({ credential: s.credential, reason: "constraints_unknown_key", keys: ["maxAmount"] });
 
     const again = await connect(s);
-    expect(again.auth, "a restart presented a held VC").toBeNull();
-    expect(again.pendingReason).toContain("maxAmount");
+    expect(authOf(again), "a restart presented a held VC").toBeNull();
+    expect(routeOf(again)?.pendingReason).toContain("maxAmount");
 
     expect(await main(["credentials", "unhold", "--url", s.rp.url, "--key-file", (s.store.location)])).toBe(0);
-    expect((await connect(s)).auth, "unhold didn't release the VC").not.toBeNull();
+    expect(authOf(await connect(s)), "unhold didn't release the VC").not.toBeNull();
   });
 
   it.each(["constraints_missing", "constraints_unknown_key"])(
@@ -122,18 +129,19 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
       const s = await setup(reason, ["k"]);
       const target = await connect(s);
       const fresh = vc("new");
-      s.store.save({ ...s.store.load()!, credentials: { [s.rp.url]: fresh } });
+      s.store.save({ ...s.store.load()!, credentials: { [slot(s.rp.url)]: fresh } });
       expect(await call(target)).toBe(403);
       const after = s.store.load()!;
-      expect(after.credentials?.[s.rp.url], "the refusal of the old VC clobbered the imported one").toBe(fresh);
-      expect(after.held?.[s.rp.url], "the imported VC was marked held").toBeUndefined();
+      expect(after.credentials?.[slot(s.rp.url)], "the refusal of the old VC clobbered the imported one").toBe(fresh);
+      expect(after.held?.[slot(s.rp.url)], "the imported VC was marked held").toBeUndefined();
     });
 
   it("status shows a held delegation even when the daemon is stopped (metapass-saas F5)", async () => {
     const s = await setup("constraints_unknown_key", ["maxAmount"]);
     const keyFile = s.store.location;
     saveConfig(join(keyFile, ".."), { rps: [{ alias: "minipaas", url: s.rp.url, verifierUrl: s.rp.verifierUrl }] });
-    s.store.save({ ...s.store.load()!, held: { [s.rp.url]: { credential: s.credential, reason: "constraints_unknown_key", keys: ["maxAmount"] } } });
+    s.store.save({ ...s.store.load()!, credentials: { [slot(s.rp.url)]: s.credential },
+      held: { [slot(s.rp.url)]: { credential: s.credential, reason: "constraints_unknown_key", keys: ["maxAmount"] } } });
     const out: string[] = [];
     const spy = vi.spyOn(console, "log").mockImplementation((...a) => void out.push(a.join(" ")));
     closers.push(() => spy.mockRestore());
@@ -145,7 +153,7 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     const s = await setup("constraints_unknown_key", ["k"]);
     const data = s.store.load()!;
     s.store.save({ ...data, held: { [s.rp.url]: { credential: vc("old"), reason: "constraints_unknown_key", keys: ["k"] } } });
-    expect((await connect(s)).auth).not.toBeNull();
+    expect(authOf(await connect(s))).not.toBeNull();
   });
 
   it("add --verifier saves a /1 RP without pairing, and import stores the VC", async () => {
@@ -158,7 +166,7 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     const file = join(keyFile, "..", "vc.txt");
     writeFileSync(file, vc() + "\n");
     expect(await main(["credentials", "import", "--url", url + "/", file, "--key-file", keyFile])).toBe(0);
-    expect(openStore({ backend: "file", keyFile }).load()!.credentials?.[url]).toBe(vc());
+    expect(openStore({ backend: "file", keyFile }).load()!.credentials?.[slot(url)]).toBe(vc());
   });
 
   it("add --verifier won't silently convert a v0 RP; --force does (Briefick)", async () => {
@@ -185,9 +193,9 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     store.save({ privateJwk: key.exportPrivateJwk(), credentials: { [url]: vc() } });
     const broken = { ...store, save: () => { throw new Error("disk full"); } };
     const target: DaemonTarget = { alias: "minipaas", targetMcpUrl: url + "/api/mcp", auth: null };
-    const auth = await connectV1Target(target, store.load()!, { alias: "minipaas", url, verifierUrl: v.url }, broken, key);
-    closers.push(() => auth?.stop());
-    expect(auth?.state()).toMatchObject({ status: "dropped" });
+    const rp = await connectV1Target(target, store.load()!, { alias: "minipaas", url, verifierUrl: v.url }, broken, key);
+    closers.push(() => rp.stop());
+    expect(authOf(target)?.state()).toMatchObject({ status: "dropped" });
   });
 
   it("import refuses a file that isn't an SD-JWT VC", async () => {

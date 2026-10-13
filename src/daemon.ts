@@ -29,6 +29,11 @@ export interface DaemonTarget {
   pendingReason?: string;
   /** A delegation the RP refused with §11.1 `keep`: still stored, not presented again by this process. */
   heldCredential?: string;
+  /**
+   * §15: a `/1` RP's delegations, one daemon route each (`/<alias>/<route>/mcp`). Present for `/1` targets; then this
+   * target's own `auth` stays null and `pendingReason` says why there is no route yet.
+   */
+  routes?: Map<string, DaemonTarget>;
 }
 
 export interface DaemonOptions {
@@ -84,6 +89,11 @@ function drainAnd(creq: http.IncomingMessage, respond: () => void): void {
   respond();
 }
 
+function view(t: DaemonTarget): { alias: string; connected: boolean; pendingReason?: string; session?: unknown } {
+  const st = (t.auth as { state?: () => unknown } | null)?.state?.();
+  return { alias: t.alias, connected: t.auth !== null, pendingReason: t.auth ? undefined : t.pendingReason, session: st };
+}
+
 export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
   const host = opts.host ?? "127.0.0.1";
   const audit = opts.audit ?? ((line: string) => console.error(line));
@@ -102,20 +112,24 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
     // Session state per RP for `status`: a stopped or failing refresh must not read as «delegation valid» (Briefick).
     if (creq.method === "GET" && path === "/status") {
       return json(cres, 200, {
-        targets: opts.targets.map((t) => {
-          const st = (t.auth as { state?: () => unknown } | null)?.state?.();
-          return { alias: t.alias, connected: t.auth !== null, pendingReason: t.auth ? undefined : t.pendingReason, session: st };
-        }),
+        targets: opts.targets.map((t) => ({
+          ...view(t),
+          ...(t.routes ? { routes: [...t.routes].map(([route, r]) => ({ route, ...view(r) })) } : {}),
+        })),
       });
     }
 
-    // 라우팅: /<alias>/mcp… 또는 (RP 1개일 때) /mcp…
+    // 라우팅: /<alias>/<route>/mcp… (§15), /<alias>/mcp… 또는 (RP 1개일 때) /mcp…
     let target: DaemonTarget | undefined;
     let rest = "";
     const m = path.match(/^\/([^/]+)\/mcp(\/.*)?$/);
+    const r = path.match(/^\/([^/]+)\/([^/]+)\/mcp(\/.*)?$/);
     if (m && byAlias.has(m[1])) {
       target = byAlias.get(m[1]);
       rest = m[2] ?? "";
+    } else if (r && byAlias.get(r[1])?.routes?.has(r[2])) {
+      target = byAlias.get(r[1])!.routes!.get(r[2]);
+      rest = r[3] ?? "";
     } else if (/^\/mcp(\/.*)?$/.test(path)) {
       if (opts.targets.length === 1) {
         target = opts.targets[0];
@@ -130,6 +144,19 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
     }
     if (!target) {
       return drainAnd(creq, () => json(cres, 404, { error: "unknown_path", aliases: opts.targets.map((t) => t.alias) }));
+    }
+    // §15: an RP-level path names a route only while there is exactly one; with several, the user picks one.
+    if (target.routes && target.routes.size > 0) {
+      if (target.routes.size > 1) {
+        const routes = [...target.routes.keys()];
+        const alias = target.alias;
+        return drainAnd(creq, () => json(cres, 410, {
+          error: "ambiguous_route",
+          message: `${alias} 에 위임이 여러 개입니다 — /${alias}/<route>/mcp 경로로 등록하세요 (\`status\`가 명령을 출력)`,
+          routes,
+        }));
+      }
+      target = [...target.routes.values()][0];
     }
     if (!target.auth) {
       return drainAnd(creq, () => json(cres, 503, {
