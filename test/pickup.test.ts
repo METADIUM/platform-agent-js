@@ -283,3 +283,76 @@ describe("metapass-saas's #51 findings", () => {
     expect(s.load()!.credentials?.["https://rp"], "a dropped VC beyond a count cap was re-adopted").toBeUndefined();
   });
 });
+
+describe("metapass-saas's #51 follow-ups", () => {
+  async function fresh() {
+    const d = mkdtempSync(join(tmpdir(), "mpa-f2-"));
+    closers.push(() => rmSync(d, { recursive: true, force: true }));
+    const s = openStore({ backend: "file", keyFile: join(d, "key.json") });
+    const key = await AgentKey.generate();
+    s.save({ privateJwk: key.exportPrivateJwk() });
+    return { s, key };
+  }
+
+  it("a store that can't be read at the drop still keeps the dropped VC from coming back", async () => {
+    const { s, key } = await fresh();
+    let tokenCalls = 0;
+    const verifier = await server((req, _b, res) => {
+      if (req.url === "/agent/nonce") return json(res, 200, { c_nonce: "n" });
+      tokenCalls++;
+      json(res, 400, { error: "invalid_delegation" });
+    });
+    const refused = vc("refused-unreadable-store");
+    const data = { ...s.load()!, credentials: { "https://rp": refused } };
+    const unreadable = { ...s, load: () => null, save: () => {} };
+    const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
+    let sleeps = 0;
+    await connectV1Target(target, data, { alias: "m", url: "https://rp", verifierUrl: verifier }, unreadable, key, {
+      pickup: async () => ({ ok: true, delegations: [{ delegationId: "r", credential: refused, scope: [], exp: 1 }] }),
+      sleep: async () => { if (++sleeps > 4) await new Promise(() => {}); },
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(tokenCalls, "with an unreadable store the dropped VC was exchanged again").toBe(1);
+  });
+
+  it("a pickup that throws waits the interval before the next try", async () => {
+    const { s, key } = await fresh();
+    const slept: number[] = [];
+    const answers: Array<PickupResult | Error> = [new Error("ECONNRESET"),
+      { ok: true, delegations: [{ delegationId: "d", credential: vc("after-throw"), scope: [], exp: 1 }] }];
+    const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
+    const auth = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
+      pickup: async () => { const a = answers.shift()!; if (a instanceof Error) throw a; return a; },
+      sleep: async (ms) => void slept.push(ms),
+    });
+    closers.push(() => auth?.stop());
+    expect(slept, "a thrown pickup retried without waiting").toEqual([60_000]);
+  });
+
+  it("an expired dropped VC is forgotten; never-expiring ones are capped", async () => {
+    const { vcDigest, DROPPED_WITHOUT_EXP_KEPT } = await import("../src/cli.js");
+    const { s, key } = await fresh();
+    const past = Math.floor(Date.now() / 1000) - 10;
+    const nulls = Array.from({ length: DROPPED_WITHOUT_EXP_KEPT + 5 }, (_, i) => ({ digest: "n" + i, exp: null }));
+    s.save({ ...s.load()!, dropped: { "https://rp": [{ digest: "expired", exp: past }, ...nulls] } });
+    let tokenCalls = 0;
+    const verifier = await server((req, _b, res) => {
+      if (req.url === "/agent/nonce") return json(res, 200, { c_nonce: "n" });
+      tokenCalls++;
+      json(res, 400, { error: "invalid_delegation" });
+    });
+    const refused = vc("newest");
+    const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
+    await connectV1Target(target, { ...s.load()!, credentials: { "https://rp": refused } },
+      { alias: "m", url: "https://rp", verifierUrl: verifier }, s, key, {
+        pickup: async () => ({ ok: false, error: "authorization_pending" }),
+        sleep: async () => { await new Promise(() => {}); },
+      });
+    await new Promise((r) => setTimeout(r, 200));
+    const kept = s.load()!.dropped!["https://rp"];
+    expect(kept.some((d) => d.digest === "expired"), "an expired entry was kept").toBe(false);
+    expect(kept.filter((d) => d.exp === null).length).toBeLessThanOrEqual(DROPPED_WITHOUT_EXP_KEPT);
+    expect(kept.at(-1)?.digest, "the newest drop wasn't kept").toBe(vcDigest(refused));
+    expect(tokenCalls).toBe(1);
+  });
+});

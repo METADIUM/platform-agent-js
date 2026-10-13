@@ -101,17 +101,7 @@ export function install(logFile: string): InstallResult {
   }
   if (process.platform === "darwin") {
     const plistPath = join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
-    const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>${LAUNCHD_LABEL}</string>
-  <key>ProgramArguments</key><array>${args.map((a) => `<string>${xmlEscape(a)}</string>`).join("")}</array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${xmlEscape(logFile)}</string>
-  <key>StandardErrorPath</key><string>${xmlEscape(logFile)}</string>
-</dict></plist>
-`;
+    const plist = launchdPlist(args, logFile);
     mkdirSync(join(homedir(), "Library", "LaunchAgents"), { recursive: true });
     writeFileSync(plistPath, plist);
     const domain = `gui/${process.getuid?.() ?? 501}`;
@@ -207,5 +197,26 @@ RestartPreventExitStatus=${EXIT_CONFIG}
 
 [Install]
 WantedBy=default.target
+`;
+}
+
+/**
+ * launchd can't exclude one exit code from KeepAlive, so an unreadable key store (exit 78) restarts it; 60 s between
+ * starts keeps that to a log line a minute instead of launchd's default 10 s (Briefick, #50).
+ */
+export const LAUNCHD_THROTTLE_SECONDS = 60;
+
+export function launchdPlist(args: string[], logFile: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key><array>${args.map((a) => `<string>${xmlEscape(a)}</string>`).join("")}</array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>${LAUNCHD_THROTTLE_SECONDS}</integer>
+  <key>StandardOutPath</key><string>${xmlEscape(logFile)}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(logFile)}</string>
+</dict></plist>
 `;
 }
