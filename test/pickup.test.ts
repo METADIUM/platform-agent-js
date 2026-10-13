@@ -91,7 +91,7 @@ describe("pickup (spec §8)", () => {
     expect(pickupMessage({ error: "unknown_agent" }, "https://rp")).toContain("add https://rp --verifier");
   });
 
-  it("latest picks the delegation that lasts longest", () => {
+  it("latest picks the newest; without iat, the one that lasts longest", () => {
     expect(latest([{ delegationId: "a", credential: "a", scope: [], exp: 5 }, { delegationId: "b", credential: "b", scope: [], exp: 9 }])?.delegationId).toBe("b");
     expect(latest([])).toBeNull();
   });

@@ -147,8 +147,12 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
     }
     // §15: an RP-level path names a route only while there is exactly one; with several, the user picks one.
     if (target.routes && target.routes.size > 0) {
-      if (target.routes.size > 1) {
-        const routes = [...target.routes.keys()];
+      // A dropped route stays for `status` but isn't a choice; a held one is (it may come back) (Briefick, #54).
+      const all = [...target.routes];
+      const live = all.filter(([, r]) => (r.auth as { state?: () => { status?: string } } | null)?.state?.().status !== "dropped");
+      const choices = live.length > 0 ? live : all;
+      if (choices.length > 1) {
+        const routes = choices.map(([name]) => name);
         const alias = target.alias;
         return drainAnd(creq, () => json(cres, 410, {
           error: "ambiguous_route",
@@ -156,7 +160,7 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
           routes,
         }));
       }
-      target = [...target.routes.values()][0];
+      target = choices[0][1];
     }
     if (!target.auth) {
       return drainAnd(creq, () => json(cres, 503, {

@@ -9,7 +9,8 @@ import { startDaemon, type DaemonTarget } from "../src/daemon.js";
 import { openStore } from "../src/keystore.js";
 import { saveConfig } from "../src/config.js";
 import type { PickupResult } from "../src/pickup.js";
-import { sanitizeRoute, slotKey, vcScope } from "../src/routes.js";
+import { routeFor, sanitizeRoute, slotKey, vcScope } from "../src/routes.js";
+import { latest } from "../src/pickup.js";
 
 const closers: Array<() => unknown> = [];
 afterEach(async () => {
@@ -18,7 +19,8 @@ afterEach(async () => {
 
 const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
 /** An SD-JWT VC with a plain `scope` claim (§5.1) and an `exp`. */
-const vc = (scope: string[], exp: number, n = "") => `${b64({ alg: "ES256" })}.${b64({ iss: "did:jwk:x", scope, exp, n })}.sig~`;
+const vc = (scope: string[], exp: number, n = "", iat?: number) =>
+  `${b64({ alg: "ES256" })}.${b64({ iss: "did:jwk:x", scope, exp, n, ...(iat !== undefined ? { iat } : {}) })}.sig~`;
 
 function server(handler: (req: http.IncomingMessage, body: string, res: http.ServerResponse) => void) {
   return new Promise<string>((resolve) => {
@@ -182,6 +184,67 @@ describe("§15 multiple delegations: one daemon route each", () => {
     expect(stored[slotKey(s.rp, "paas.deploy")]).toBe(legacy);
     const post = await daemonFor(s.target);
     expect((await post("/m/mcp")).status, "an existing /<alias>/mcp registration broke with one route").toBe(200);
+  });
+});
+
+describe("§15 review fixes (Briefick, #54)", () => {
+  it("newer means issued later: a later, shorter delegation wins; a tie keeps the current", async () => {
+    const broad = vc(["paas.deploy"], 900, "broad", 100);
+    const narrow = vc(["paas.deploy"], 300, "narrow", 200);   // issued later, ends sooner: the user's latest intent
+    const pick = (c: string, exp: number) => ({ delegationId: c.slice(-6), credential: c, scope: ["paas.deploy"], exp });
+    expect(latest([pick(broad, 900), pick(narrow, 300)])?.credential, "latest preferred the longer one").toBe(narrow);
+    const twin = vc(["paas.deploy"], 900, "twin", 100);
+    expect(latest([pick(broad, 900), pick(twin, 900)])?.credential, "a tie didn't keep the first").toBe(broad);
+
+    const s = await setup();
+    const answers: PickupResult[] = [
+      { ok: true, delegations: [pick(broad, 900)] },
+      { ok: true, delegations: [pick(broad, 900), pick(narrow, 300)] },
+    ];
+    const c = clock();
+    const v1 = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key, {
+      pickup: async () => answers.shift()!, sleep: c.sleep,
+    });
+    closers.push(() => v1.stop());
+    await c.tick();
+    expect(s.store.load()!.credentials?.[slotKey(s.rp, "paas.deploy")], "a later, narrower delegation was ignored").toBe(narrow);
+  });
+
+  it("a dropped route isn't a choice: with one live route left, the RP path serves it", async () => {
+    const s = await setup();
+    const keep = vc(["paas.deploy"], 9, "keep");
+    const refused = vc(["paas.read"], 9, "refused");
+    // The verifier refuses the `paas.read` VC, so that route is dropped at its first exchange.
+    const verifier = await server((req, body, res) => {
+      res.writeHead(req.url === "/agent/nonce" ? 200 : JSON.parse(body).vp_token.startsWith(refused) ? 400 : 200,
+        { "content-type": "application/json" });
+      if (req.url === "/agent/nonce") return res.end(JSON.stringify({ c_nonce: "n" }));
+      res.end(JSON.stringify(JSON.parse(body).vp_token.startsWith(refused)
+        ? { error: "invalid_delegation" } : { access_token: "a.b.c", expires_in: 300 }));
+    });
+    const c = clock();
+    const v1 = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: verifier }, s.store, s.key, {
+      pickup: async () => ({ ok: true, delegations: [
+        { delegationId: "k", credential: keep, scope: ["paas.deploy"], exp: 9 },
+        { delegationId: "r", credential: refused, scope: ["paas.read"], exp: 9 },
+      ] }),
+      sleep: c.sleep,
+    });
+    closers.push(() => v1.stop());
+    expect(v1.routes.size, "the dropped route left status").toBe(2);
+    const post = await daemonFor(s.target);
+    expect((await post("/m/mcp")).status, "a dropped route made the RP path ambiguous").toBe(200);
+  });
+
+  it("a scope whose default name was taken by a rename gets its own route; rename refuses known names", async () => {
+    expect(routeFor(["b"], { a: "b" }), "scope b would share route b with renamed scope a").toBe("b-2");
+    const s = await setup();
+    s.store.save({ ...s.store.load()!, credentials: {
+      [slotKey(s.rp, "a")]: vc(["a"], 9), [slotKey(s.rp, "x")]: vc(["b"], 9),   // x holds a scope-b VC (imported --route x)
+    } });
+    expect(await main(["route", "rename", "--url", s.rp, "a", "b", "--key-file", s.keyFile]),
+      "renamed onto a scope's default route that is stored here").toBe(1);
+    expect(await main(["route", "rename", "--url", s.rp, "a", "c", "--key-file", s.keyFile])).toBe(0);
   });
 });
 

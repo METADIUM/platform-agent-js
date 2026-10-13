@@ -22,7 +22,9 @@ export function defaultRoute(scope: readonly string[] | undefined): string {
 /** The route a delegation goes to: the user's name for its default route, else the default. */
 export function routeFor(scope: readonly string[] | undefined, names: Record<string, string> | undefined): string {
   const d = defaultRoute(scope);
-  return names?.[d] ?? d;
+  if (names?.[d]) return names[d];
+  // Another scope's route was renamed to this default: keep the two apart instead of letting one replace the other.
+  return Object.values(names ?? {}).includes(d) ? `${d}-2` : d;
 }
 
 export function slotKey(url: string, route: string): string {

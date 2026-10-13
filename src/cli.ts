@@ -22,8 +22,8 @@ import { AgentClientError, BriefickAgentClient, isRequestExpired, DEFAULT_SERVIC
 import { AgentAuth } from "./agent.js";
 import { DelegationSessionAuth, type SessionState } from "./delegation-session.js";
 import { exchangeSessionToken } from "./session.js";
-import { DEFAULT_POLL_INTERVAL_S, latest, pickup, pickupMessage, type PickedDelegation, type PickupResult } from "./pickup.js";
-import { routeFor, sanitizeRoute, slotKey, slotsOf, vcScope } from "./routes.js";
+import { DEFAULT_POLL_INTERVAL_S, isNewer, latest, pickup, pickupMessage, type PickedDelegation, type PickupResult } from "./pickup.js";
+import { defaultRoute, routeFor, sanitizeRoute, slotKey, slotsOf, vcScope } from "./routes.js";
 import { constraintRefusalAction } from "./constraint-refusal.js";
 import { startProxy, type BearerSource } from "./proxy.js";
 import { defaultKeyFile, KeyStoreUnreadable, loadStore, openStore, type AgentStore, type DroppedVc, type HeldCredential, type KeyStore } from "./keystore.js";
@@ -805,7 +805,7 @@ export async function connectV1Target(
           const current = data.credentials?.[slot];
           if (current === best.credential && routes.has(route)) continue;
           // A newer delegation replaces the route's; an older one still live never displaces it (§15).
-          if (current && current !== best.credential && (best.exp ?? 0) <= (vcExp(current) ?? 0)) continue;
+          if (current && current !== best.credential && !isNewer(best, { credential: current, exp: vcExp(current) })) continue;
           updateStore(store, data, (s) => {
             s.credentials = { ...(s.credentials ?? {}), [slot]: best.credential };
           });
@@ -1164,8 +1164,15 @@ export async function main(argv: string[]): Promise<number> {
     if (!data) return fail("키 저장소 없음");
     const fromSlot = slotKey(url, from);
     const toSlot = slotKey(url, to);
-    if (data.credentials?.[toSlot]) return fail(`이미 있는 경로입니다: ${to}`);
     const names = { ...(data.routeNames?.[url] ?? {}) };
+    // Refuse a name in use: a stored route, a name given before, or a scope's default route seen here (Briefick).
+    const taken = new Set<string>([
+      ...slotsOf(data.credentials, url).map((x) => x.route),
+      ...slotsOf(data.credentials, url).map((x) => defaultRoute(vcScope(x.value))),
+      ...Object.keys(names), ...Object.values(names),
+    ]);
+    taken.delete(from);
+    if (taken.has(to)) return fail(`이미 쓰는 경로 이름입니다: ${to}`);
     // The default route (first scope) this name stands for: renamed before, or the default itself.
     const base = Object.entries(names).find(([, v]) => v === from)?.[0] ?? from;
     names[base] = to;
