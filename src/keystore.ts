@@ -26,6 +26,8 @@ export interface KeyStore {
   held?: Record<string, HeldCredential>;
   /** URL별, VCs an RP refused with §11.1 `drop` (digest, and the VC's `exp` to forget it by); pickup would hand them back. */
   dropped?: Record<string, DroppedVc[]>;
+  /** URL별, the user's names for routes (§15): default route (first scope) → name. */
+  routeNames?: Record<string, Record<string, string>>;
 }
 
 export interface DroppedVc {

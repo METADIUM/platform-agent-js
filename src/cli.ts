@@ -22,12 +22,13 @@ import { AgentClientError, BriefickAgentClient, isRequestExpired, DEFAULT_SERVIC
 import { AgentAuth } from "./agent.js";
 import { DelegationSessionAuth, type SessionState } from "./delegation-session.js";
 import { exchangeSessionToken } from "./session.js";
-import { DEFAULT_POLL_INTERVAL_S, latest, pickup, pickupMessage, type PickupResult } from "./pickup.js";
+import { DEFAULT_POLL_INTERVAL_S, isNewer, latest, pickup, pickupMessage, type PickedDelegation, type PickupResult } from "./pickup.js";
+import { defaultRoute, routeFor, sanitizeRoute, slotKey, slotsOf, vcScope } from "./routes.js";
 import { constraintRefusalAction } from "./constraint-refusal.js";
 import { startProxy, type BearerSource } from "./proxy.js";
-import { defaultKeyFile, KeyStoreUnreadable, loadStore, openStore, type AgentStore, type DroppedVc, type KeyStore } from "./keystore.js";
+import { defaultKeyFile, KeyStoreUnreadable, loadStore, openStore, type AgentStore, type DroppedVc, type HeldCredential, type KeyStore } from "./keystore.js";
 import {
-  aliasFromUrl, configDir, ensureToken, loadConfig, mcpAddCommand, rotateToken, saveConfig,
+  aliasFromUrl, configDir, ensureToken, loadConfig, mcpAddCommand, mcpAddRouteCommand, rotateToken, saveConfig,
   type DaemonConfig, type DaemonRp,
 } from "./config.js";
 import { startDaemon, type DaemonTarget } from "./daemon.js";
@@ -54,6 +55,10 @@ interface Args {
   verifierRp?: string;
   /** The third positional, e.g. the file in `credentials import`. */
   arg2?: string;
+  /** The fourth positional, e.g. the new name in `route rename`. */
+  arg3?: string;
+  /** §15: the daemon route a delegation goes to (`credentials import`/`unhold`, `route rename`). */
+  route?: string;
   insecureNoToken: boolean;
   install: boolean;
   uninstallFlag: boolean;
@@ -106,6 +111,7 @@ function parse(argv: string[]): Args {
     else if (a === "--alias") out.alias = val();
     else if (a === "--verifier") out.verifier = val();
     else if (a === "--verifier-rp") out.verifierRp = val();
+    else if (a === "--route") out.route = val();
     else if (a === "--label") out.label = val();
     else if (a === "--insecure-no-token") out.insecureNoToken = true;
     else if (a === "--install") out.install = true;
@@ -126,6 +132,7 @@ function parse(argv: string[]): Args {
   out.cmd ??= rest[0];
   out.sub = rest[1];
   out.arg2 = rest[2];
+  out.arg3 = rest[3];
   out.url ??= process.env.BRIEFICK_URL;
   out.code ??= process.env.PAIRING_CODE;
   out.keyFile ||= defaultKeyFile();
@@ -251,6 +258,7 @@ export function updateStore(store: AgentStore, data: KeyStore, change: (fresh: K
   data.registrations = fresh.registrations;
   data.held = fresh.held;
   data.dropped = fresh.dropped;
+  data.routeNames = fresh.routeNames;
 }
 
 /** 캐시된 위임 VC 삭제. 있었으면 true. With `only`, deletes it only while it is still that VC. */
@@ -324,6 +332,7 @@ interface DaemonSessionView {
   connected: boolean;
   pendingReason?: string;
   session?: V0Session | SessionState;
+  routes?: Array<DaemonSessionView & { route: string }>;
 }
 
 interface V0Session { stopped: boolean; stopReason?: string; failures: number; lastError?: string; lastRefreshAt?: string; expiresAt?: string }
@@ -617,91 +626,58 @@ function pollInterval(current: number, sent: unknown): number {
   return Math.max(DEFAULT_POLL_INTERVAL_S, current, s);
 }
 
-/**
- * §8: poll pickup at the RP's interval until a live delegation arrives, store it, and return it. Null when the RP
- * has no §8 pickup (404): polling it would never succeed, so the VC has to come by `credentials import`.
- */
-async function waitPickup(target: DaemonTarget, data: KeyStore, rp: DaemonRp, store: AgentStore, deps: Required<V1Deps>): Promise<string | null> {
-  let interval = DEFAULT_POLL_INTERVAL_S;
-  let notFound = 0;
-  for (;;) {
-    let reason: string;
-    try {
-      const r = await deps.pickup();
-      if (r.ok || r.error !== "no_pickup") notFound = 0;
-      if (r.ok) {
-        // Persisted, so a restart doesn't re-adopt a VC this agent already saw refused (minipaas, Briefick).
-        const d = latest(r.delegations.filter((x) => !isDropped(store, data, rp.url, x.credential)));
-        if (d) {
-          const fresh = store.load() ?? data;
-          fresh.credentials = { ...(fresh.credentials ?? {}), [rp.url]: d.credential };
-          store.save(fresh);
-          data.credentials = fresh.credentials;
-          console.error(`[${rp.alias}] 위임 수령(${d.delegationId})`);
-          return d.credential;
-        }
-        reason = "위임 대기 — 지갑에서 승인하면 자동으로 받습니다";
-      } else if (r.error === "no_pickup" && ++notFound >= 2) {
-        // Two in a row, an interval apart: one 404 can be a deploy in progress (Briefick).
-        target.pendingReason = `이 RP는 §8 회수를 지원하지 않습니다 — credentials import --url ${rp.url} <파일>`;
-        console.error(`[${rp.alias}] ${target.pendingReason}`);
-        return null;
-      } else if (r.error === "no_pickup") {
-        reason = `회수 경로가 없습니다(404) — ${interval}초 후 한 번 더 확인합니다`;
-      } else {
-        interval = pollInterval(interval, r.interval);
-        reason = pickupMessage(r, rp.url);
-      }
-    } catch (e) {
-      notFound = 0;   // "two in a row" means two answers in a row; an error between them breaks the run
-      reason = `회수 실패 — ${interval}초 후 재시도: ${e instanceof Error ? e.message : String(e)}`;
+/** A `/1` RP's routes (§15) and its pickup loop (§8). */
+export interface V1Rp {
+  routes: Map<string, DaemonTarget>;
+  /** Stops pickup and every route's session. */
+  stop(): void;
+}
+
+/** Moves a pre-§15 `credentials[url]` (and its `held`) to the route its scope names. */
+function migrateLegacyCredential(store: AgentStore, data: KeyStore, url: string): void {
+  if (!data.credentials?.[url] && !store.load()?.credentials?.[url]) return;
+  const move = (s: KeyStore): void => {
+    const vc = s.credentials?.[url];
+    if (!vc) return;
+    const slot = slotKey(url, routeFor(vcScope(vc), s.routeNames?.[url]));
+    const { [url]: _c, ...credentials } = s.credentials!;
+    s.credentials = { ...credentials, [slot]: vc };
+    const h = s.held?.[url];
+    if (h) {
+      const { [url]: _h, ...held } = s.held!;
+      s.held = { ...held, ...(h.credential === vc ? { [slot]: h } : {}) };
     }
-    if (reason !== target.pendingReason) console.error(`[${rp.alias}] ${reason}`);
-    target.pendingReason = reason;
-    await deps.sleep(interval * 1000);
+  };
+  try {
+    updateStore(store, data, move);
+  } catch (e) {
+    // A store that can't be written must not keep the daemon from serving: migrate this process's copy (Briefick).
+    console.error(`위임 저장 형식 이관 실패(이번 실행만 메모리에서): ${e instanceof Error ? e.message : String(e)}`);
+    move(data);
   }
 }
 
-export async function connectV1Target(
-  target: DaemonTarget,
-  data: KeyStore,
-  rp: DaemonRp & { verifierUrl: string },
-  store: AgentStore,
-  key: AgentKey,
-  deps: V1Deps = {},
+/** One route's `/1` session for `vc`; null when the VC is held (§11.1 `keep`). */
+async function connectRoute(
+  rt: DaemonTarget, slot: string, vc: string, data: KeyStore, rp: DaemonRp & { verifierUrl: string },
+  store: AgentStore, key: AgentKey,
 ): Promise<DelegationSessionAuth | null> {
-  let credential = data.credentials?.[rp.url];
-  // A VC this agent already saw refused is never presented again, from memory or the store (metapass-saas B1).
-  if (credential && isDropped(store, data, rp.url, credential)) credential = undefined;
-  if (!credential) {
-    if (!deps.pickup) {
-      target.pendingReason = `위임 VC 없음 — credentials import --url ${rp.url} <파일>`;
-      return null;
-    }
-    const picked = await waitPickup(target, data, rp, store, {
-      pickup: deps.pickup,
-      sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
-    });
-    if (!picked) return null;
-    credential = picked;
-  }
-  const held = data.held?.[rp.url];
-  if (held?.credential === credential) {
-    target.pendingReason = heldMessage(held);
+  const held = data.held?.[slot];
+  if (held?.credential === vc) {
+    rt.pendingReason = heldMessage(held);
     return null;
   }
-  const vc: string = credential;
   // Persisted, so a restart doesn't present a refused VC again (§11.1).
   // Re-read before writing: `credentials import`/`unhold` may have changed the store since `up` (metapass-saas).
   const persistStopped = (s: Extract<SessionState, { status: "dropped" | "held" }>): void => {
     const entry = { digest: vcDigest(vc), exp: vcExp(vc) };
     const nowS = Date.now() / 1000;
     if (s.status === "dropped") {
-      // Memory first, before reading the store: if the store can't be read, the reconnect still must not present
-      // this VC again (metapass-saas on #51: it came back once a minute).
+      // Memory first, before reading the store: if the store can't be read, the next pickup pass still must not
+      // present this VC again (metapass-saas on #51: it came back once a minute).
       data.dropped = withDropped(data.dropped, rp.url, entry, nowS);
-      if (data.credentials?.[rp.url] === vc) {
-        const { [rp.url]: _mem, ...restMem } = data.credentials;
+      if (data.credentials?.[slot] === vc) {
+        const { [slot]: _mem, ...restMem } = data.credentials;
         data.credentials = restMem;
       }
     }
@@ -712,19 +688,19 @@ export async function connectV1Target(
       fresh.dropped = withDropped(fresh.dropped, rp.url, entry, nowS);
       data.dropped = fresh.dropped;
     }
-    if (fresh.credentials?.[rp.url] !== vc) {
+    if (fresh.credentials?.[slot] !== vc) {
       if (s.status === "dropped") store.save(fresh);
       return;
     }
     if (s.status === "dropped") {
-      const { [rp.url]: _gone, ...rest } = fresh.credentials;
+      const { [slot]: _gone, ...rest } = fresh.credentials;
       fresh.credentials = rest;
-      console.error(`[${rp.alias}] 위임 폐기(${s.error}) — 저장된 VC 삭제, 새 위임 필요`);
+      console.error(`[${rt.alias}] 위임 폐기(${s.error}) — 저장된 VC 삭제, 새 위임 필요`);
     } else {
       const { status: _s, ...h } = s;
       const record = { credential: vc, ...h };
-      fresh.held = { ...(fresh.held ?? {}), [rp.url]: record };
-      console.error(`[${rp.alias}] ${heldMessage(record)}`);
+      fresh.held = { ...(fresh.held ?? {}), [slot]: record };
+      console.error(`[${rt.alias}] ${heldMessage(record)}`);
     }
     store.save(fresh);
     data.credentials = fresh.credentials;
@@ -739,25 +715,133 @@ export async function connectV1Target(
         persistStopped(s);
       } catch (e) {
         // Thrown from the session's callback, this would end the daemon (Briefick).
-        console.error(`[${rp.alias}] 위임 상태 저장 실패: ${e instanceof Error ? e.message : String(e)}`);
+        console.error(`[${rt.alias}] 위임 상태 저장 실패: ${e instanceof Error ? e.message : String(e)}`);
       }
-      // A dropped VC is gone: wait one interval, then look for a new delegation by pickup. The wait bounds any
-      // drop → reconnect cycle to one per interval, whatever caused the drop (metapass-saas B1).
-      if (s.status === "dropped" && deps.pickup && target.auth === auth) {
-        target.auth = null;
-        const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-        void sleep(DEFAULT_POLL_INTERVAL_S * 1000)
-          .then(() => connectV1Target(target, data, rp, store, key, deps))
-          .catch((e: unknown) => {
-            target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
-          });
-      }
+      // A dropped route stays (status shows it) until pickup brings a new delegation for it. Pickup runs once per
+      // interval, which bounds any drop → re-present cycle to one per interval (metapass-saas B1).
     },
   });
-  target.auth = auth;
+  rt.auth = auth;
   await auth.start();
-  console.error(`[${rp.alias}] /1 연결 → ${target.targetMcpUrl} (검증자 ${rp.verifierUrl})`);
+  console.error(`[${rt.alias}] /1 연결 → ${rt.targetMcpUrl} (검증자 ${rp.verifierUrl})`);
   return auth;
+}
+
+/**
+ * A `/1` RP: its stored delegations become routes (§15), and pickup (§8) keeps running at the RP's interval so a newly
+ * approved delegation arrives without a restart; on the same route a newer one replaces the older. The first pickup
+ * pass runs before this returns. With no pickup, or once the RP shows it has none (two `404`s), only stored or
+ * imported VCs are served.
+ */
+export async function connectV1Target(
+  target: DaemonTarget,
+  data: KeyStore,
+  rp: DaemonRp & { verifierUrl: string },
+  store: AgentStore,
+  key: AgentKey,
+  deps: V1Deps = {},
+): Promise<V1Rp> {
+  const routes = new Map<string, DaemonTarget>();
+  target.routes = routes;
+  target.auth = null;
+  const sessions = new Map<string, DelegationSessionAuth>();
+  let stopped = false;
+  const handle: V1Rp = {
+    routes,
+    stop() {
+      stopped = true;
+      for (const a of sessions.values()) a.stop();
+    },
+  };
+  const connect = async (route: string, vc: string): Promise<void> => {
+    sessions.get(route)?.stop();
+    sessions.delete(route);
+    let rt = routes.get(route);
+    if (!rt) {
+      rt = { alias: `${target.alias}/${route}`, targetMcpUrl: target.targetMcpUrl, auth: null };
+      routes.set(route, rt);
+    }
+    rt.auth = null;
+    const a = await connectRoute(rt, slotKey(rp.url, route), vc, data, rp, store, key);
+    if (a) sessions.set(route, a);
+  };
+
+  migrateLegacyCredential(store, data, rp.url);
+  // A VC this agent already saw refused is never presented again, from memory or the store (metapass-saas B1).
+  for (const { route, value: vc } of slotsOf(data.credentials, rp.url)) {
+    if (!isDropped(store, data, rp.url, vc)) await connect(route, vc);
+  }
+  if (!deps.pickup) {
+    if (routes.size === 0) target.pendingReason = `위임 VC 없음 — credentials import --url ${rp.url} <파일>`;
+    return handle;
+  }
+
+  const pickupNow = deps.pickup;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let interval = DEFAULT_POLL_INTERVAL_S;
+  let notFound = 0;
+  const say = (reason: string): void => {
+    if (reason !== target.pendingReason) console.error(`[${rp.alias}] ${reason}`);
+    target.pendingReason = reason;
+  };
+  /** One pickup pass; false when pickup should stop (the RP has none). */
+  const pass = async (): Promise<boolean> => {
+    try {
+      const r = await pickupNow();
+      if (r.ok || r.error !== "no_pickup") notFound = 0;
+      if (r.ok) {
+        const names = (store.load() ?? data).routeNames?.[rp.url] ?? data.routeNames?.[rp.url];
+        const byRoute = new Map<string, PickedDelegation[]>();
+        for (const d of r.delegations) {
+          // Persisted, so a restart doesn't re-adopt a VC this agent already saw refused (minipaas, Briefick).
+          if (isDropped(store, data, rp.url, d.credential)) continue;
+          const route = routeFor(d.scope, names);
+          byRoute.set(route, [...(byRoute.get(route) ?? []), d]);
+        }
+        for (const [route, ds] of byRoute) {
+          if (stopped) return false;
+          const best = latest(ds)!;
+          const slot = slotKey(rp.url, route);
+          const current = data.credentials?.[slot];
+          if (current === best.credential && routes.has(route)) continue;
+          // A newer delegation replaces the route's; an older one still live never displaces it (§15).
+          if (current && current !== best.credential && !isNewer(best, { credential: current, exp: vcExp(current) })) continue;
+          updateStore(store, data, (s) => {
+            s.credentials = { ...(s.credentials ?? {}), [slot]: best.credential };
+          });
+          console.error(`[${rp.alias}] 위임 수령(${best.delegationId}) → 경로 /${rp.alias}/${route}/mcp`);
+          await connect(route, best.credential);
+        }
+        if (routes.size === 0) say("위임 대기 — 지갑에서 승인하면 자동으로 받습니다");
+        return true;
+      }
+      if (r.error === "no_pickup" && ++notFound >= 2) {
+        // Two in a row, an interval apart: one 404 can be a deploy in progress (Briefick).
+        say(`이 RP는 §8 회수를 지원하지 않습니다 — credentials import --url ${rp.url} <파일>`);
+        return false;
+      }
+      if (r.error === "no_pickup") {
+        say(`회수 경로가 없습니다(404) — ${interval}초 후 한 번 더 확인합니다`);
+      } else {
+        interval = pollInterval(interval, r.interval);
+        say(pickupMessage(r, rp.url));
+      }
+    } catch (e) {
+      notFound = 0;   // "two in a row" means two answers in a row; an error between them breaks the run
+      say(`회수 실패 — ${interval}초 후 재시도: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return true;
+  };
+
+  if (await pass()) {
+    void (async () => {
+      while (!stopped) {
+        await sleep(interval * 1000);
+        if (stopped || !(await pass())) return;
+      }
+    })().catch((e: unknown) => say(`/1 회수 중단: ${e instanceof Error ? e.message : String(e)}`));
+  }
+  return handle;
 }
 
 function heldMessage(h: { reason: string; keys: string[]; keysTotal?: number }): string {
@@ -790,7 +874,8 @@ export const helpText = (inv: string = invocation()): string => `metapass-agent 
   add <RP_URL> --code <코드>        RP를 페어링하고 데몬에 추가합니다. Claude Code 등록 명령을 출력합니다.
                                     [--alias 이름] [--label 표시 이름]
   add <RP_URL> --verifier <URL>     /1 RP를 추가합니다. --code를 주면 페어링도 합니다. [--verifier-rp 등록부 별칭]
-                                    위임은 데몬이 RP에서 자동으로 받습니다(§8 회수).
+                                    위임은 데몬이 RP에서 자동으로 받습니다(§8 회수). 위임마다 경로가 생깁니다:
+                                    127.0.0.1:<포트>/<alias>/<경로>/mcp (경로 = 첫 scope, §15).
   up [--install]                    등록된 모든 RP를 127.0.0.1:<포트>/<alias>/mcp로 제공합니다.
                                     로컬 토큰이 필요합니다(GET /healthz만 예외).
                                     --install: OS 서비스(launchd, systemd --user)로 설치하고 시작합니다.
@@ -802,7 +887,9 @@ export const helpText = (inv: string = invocation()): string => `metapass-agent 
 위임 VC
   credentials clear [--url <RP>]        저장된 위임 VC를 지웁니다. 다음 실행 때 지갑 승인을 기다립니다.
   credentials import --url <RP> <파일>  /1 RP의 위임 VC를 파일에서 저장합니다(§8 회수가 없는 RP용).
-  credentials unhold --url <RP>         보류된 위임을 다시 씁니다(RP가 갱신된 뒤).
+                                        [--route <경로>] 기본은 그 위임의 첫 scope.
+  credentials unhold --url <RP>         보류된 위임을 다시 씁니다(RP가 갱신된 뒤). [--route <경로>]
+  route rename --url <RP> <경로> <새 이름>  위임 경로 이름을 바꿉니다. 같은 경로의 새 위임은 이전 것을 대체합니다.
 
 RP 하나만 다룰 때
   register --url <RP> --code <코드>     에이전트만 등록합니다(데몬 설정은 바꾸지 않습니다).
@@ -1012,24 +1099,27 @@ export async function main(argv: string[]): Promise<number> {
       if (!/^[\w-]+\.[\w-]+\.[\w-]+~/.test(vc)) return fail(`SD-JWT VC 가 아닙니다: ${args.arg2}`);
       const store = openAgentStore(args);
       const { data } = await keyFrom(store);
-      data.credentials = { ...(data.credentials ?? {}), [url]: vc };
+      const route = args.route ? sanitizeRoute(args.route) : routeFor(vcScope(vc), data.routeNames?.[url]);
+      data.credentials = { ...(data.credentials ?? {}), [slotKey(url, route)]: vc };
       store.save(data);
-      console.log(`✅ 위임 VC 저장: ${url} — 데몬 재시작 후 사용`);
+      console.log(`✅ 위임 VC 저장: ${url} 경로 ${route} — 데몬 재시작 후 사용`);
       return 0;
     }
     if (args.sub === "unhold") {
       const url = args.url?.replace(/\/+$/, "");
-      if (!url) return fail("사용: credentials unhold --url <RP> — 보류한 위임을 다시 제시(RP 갱신 후)");
+      if (!url) return fail("사용: credentials unhold --url <RP> [--route <경로>] — 보류한 위임을 다시 제시(RP 갱신 후)");
       const store = openAgentStore(args);
       const data = store.load();
-      if (!data?.held?.[url]) {
-        console.log(`보류 없음: ${url}`);
+      const keys = args.route ? [slotKey(url, sanitizeRoute(args.route))]
+        : [url, ...slotsOf(data?.held, url).map((x) => slotKey(url, x.route))];
+      const gone = keys.filter((k) => data?.held?.[k]);
+      if (!data?.held || gone.length === 0) {
+        console.log(`보류 없음: ${url}${args.route ? ` 경로 ${args.route}` : ""}`);
         return 0;
       }
-      const { [url]: _gone, ...rest } = data.held;
-      data.held = rest;
+      data.held = Object.fromEntries(Object.entries(data.held).filter(([k]) => !gone.includes(k)));
       store.save(data);
-      console.log(`✅ 보류 해제: ${url} — 데몬 재시작 후 다시 제시합니다`);
+      console.log(`✅ 보류 해제(${gone.length}건): ${url} — 데몬 재시작 후 다시 제시합니다`);
       return 0;
     }
     if (args.sub !== "clear") return fail("사용: credentials clear|import|unhold [--url <RP>]");
@@ -1040,7 +1130,15 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     if (args.url) {
-      if (!clearCredential(store, data, args.url)) {
+      const url = args.url.replace(/\/+$/, "");
+      const routed = slotsOf(data.credentials, url).map((x) => slotKey(url, x.route));
+      const hadPlain = clearCredential(store, data, url);
+      if (routed.length > 0) {
+        updateStore(store, data, (s) => {
+          s.credentials = Object.fromEntries(Object.entries(s.credentials ?? {}).filter(([k]) => !routed.includes(k)));
+        });
+      }
+      if (!hadPlain && routed.length === 0) {
         console.log(`캐시 없음: ${args.url}`);
         return 0;
       }
@@ -1051,6 +1149,43 @@ export async function main(argv: string[]): Promise<number> {
       store.save(data);
       console.log(`✅ 캐시 전체 삭제(${urls.length}건): ${urls.join(", ")}`);
     }
+    return 0;
+  }
+
+  if (args.cmd === "route") {
+    const url = args.url?.replace(/\/+$/, "");
+    if (args.sub !== "rename" || !url || !args.arg2 || !args.arg3) {
+      return fail("사용: route rename --url <RP> <지금 경로> <새 이름> — 위임 경로(§15) 이름 바꾸기");
+    }
+    const from = args.arg2;
+    const to = sanitizeRoute(args.arg3);
+    const store = openAgentStore(args);
+    const data = store.load();
+    if (!data) return fail("키 저장소 없음");
+    const fromSlot = slotKey(url, from);
+    const toSlot = slotKey(url, to);
+    const names = { ...(data.routeNames?.[url] ?? {}) };
+    // Refuse a name in use: a stored route, a name given before, or a scope's default route seen here (Briefick).
+    const taken = new Set<string>([
+      ...slotsOf(data.credentials, url).map((x) => x.route),
+      ...slotsOf(data.credentials, url).map((x) => defaultRoute(vcScope(x.value))),
+      ...Object.keys(names), ...Object.values(names),
+    ]);
+    taken.delete(from);
+    if (taken.has(to)) return fail(`이미 쓰는 경로 이름입니다: ${to}`);
+    // The default route (first scope) this name stands for: renamed before, or the default itself.
+    const base = Object.entries(names).find(([, v]) => v === from)?.[0] ?? from;
+    names[base] = to;
+    data.routeNames = { ...(data.routeNames ?? {}), [url]: names };
+    const move = <T>(m: Record<string, T> | undefined): Record<string, T> | undefined => {
+      if (!m?.[fromSlot]) return m;
+      const { [fromSlot]: v, ...rest } = m;
+      return { ...rest, [toSlot]: v };
+    };
+    data.credentials = move(data.credentials);
+    data.held = move(data.held);
+    store.save(data);
+    console.log(`✅ 경로 이름 변경: ${from} → ${to} (${url}) — 데몬 재시작 후 /<alias>/${to}/mcp`);
     return 0;
   }
 
@@ -1153,25 +1288,36 @@ export async function main(argv: string[]): Promise<number> {
       console.log("  등록된 RP 없음 — add <RP_URL> --code <CODE> 로 시작하세요");
       return 0;
     }
+    const delegationLine = (cred: string | undefined, held: HeldCredential | undefined): string => {
+      if (!cred) return "위임 없음 → 지갑 승인 필요";
+      if (held?.credential === cred) return `⏸ ${heldMessage(held)}`;
+      const until = delegationValidUntil(cred);
+      if (!until) return "위임 보유(만료 정보 없음)";
+      const leftMs = until.getTime() - Date.now();
+      return leftMs <= 0
+        ? `✗ 위임 만료(${until.toISOString()}) → 지갑 재승인 필요`
+        : (leftMs < 24 * 3600_000 ? "⚠ 위임 만료 임박 " : "✓ 위임 유효 ") + `(${formatLeft(leftMs)} 남음)`;
+    };
     for (const rp of cfg.rps) {
-      const cred = data?.credentials?.[rp.url];
-      let deleg = "위임 없음 → 지갑 승인 필요";
-      if (cred) {
-        const until = delegationValidUntil(cred);
-        if (!until) deleg = "위임 보유(만료 정보 없음)";
-        else {
-          const leftMs = until.getTime() - Date.now();
-          deleg = leftMs <= 0
-            ? `✗ 위임 만료(${until.toISOString()}) → 지갑 재승인 필요`
-            : (leftMs < 24 * 3600_000 ? "⚠ 위임 만료 임박 " : "✓ 위임 유효 ") + `(${formatLeft(leftMs)} 남음)`;
-        }
+      const live = sessions?.find((t) => t.alias === rp.alias);
+      const routes = rp.verifierUrl ? slotsOf(data?.credentials, rp.url) : [];
+      if (routes.length === 0) {
+        console.log(`  ${rp.alias.padEnd(10)} ${delegationLine(data?.credentials?.[rp.url], data?.held?.[rp.url])}`);
+        const sess = sessionLine(live);
+        if (sess) console.log(`  ${"".padEnd(10)} ${sess}`);
+        console.log(`  ${"".padEnd(10)} ${mcpAddCommand(rp.alias, port, token, cfg.rps.length === 1)}`);
+        continue;
       }
-      const held = data?.held?.[rp.url];
-      if (cred && held?.credential === cred) deleg = `⏸ ${heldMessage(held)}`;
-      console.log(`  ${rp.alias.padEnd(10)} ${deleg}`);
-      const sess = sessionLine(sessions?.find((t) => t.alias === rp.alias));
-      if (sess) console.log(`  ${"".padEnd(10)} ${sess}`);
-      console.log(`  ${"".padEnd(10)} ${mcpAddCommand(rp.alias, port, token, cfg.rps.length === 1)}`);
+      // §15: one line per route; with several, each needs its own MCP registration.
+      const single = routes.length === 1;
+      for (const { route, value: cred } of routes) {
+        const name = `${rp.alias}/${route}`;
+        console.log(`  ${name.padEnd(10)} ${delegationLine(cred, data?.held?.[slotKey(rp.url, route)])}`);
+        const sess = sessionLine(live?.routes?.find((r) => r.route === route));
+        if (sess) console.log(`  ${"".padEnd(10)} ${sess}`);
+        console.log(`  ${"".padEnd(10)} ${single ? mcpAddCommand(rp.alias, port, token, cfg.rps.length === 1)
+          : mcpAddRouteCommand(rp.alias, route, port, token)}`);
+      }
     }
     return 0;
   }

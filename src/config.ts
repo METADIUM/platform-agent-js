@@ -97,6 +97,11 @@ export function assertOwnerOnly(path: string): void {
 }
 
 /** 설치된 MCP 등록 명령 안내(토큰 포함) — 사용자는 복사-실행만. */
+/** §15: one MCP registration per delegation route of an RP. */
+export function mcpAddRouteCommand(alias: string, route: string, port: number, token: string): string {
+  return `claude mcp add --transport http ${alias}-${route} http://127.0.0.1:${port}/${alias}/${route}/mcp --header "Authorization: Bearer ${token}"`;
+}
+
 export function mcpAddCommand(alias: string, port: number, token: string, single: boolean): string {
   const path = single ? "/mcp" : `/${alias}/mcp`;
   return `claude mcp add --transport http ${alias} http://127.0.0.1:${port}${path} --header "Authorization: Bearer ${token}"`;

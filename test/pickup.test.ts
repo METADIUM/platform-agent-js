@@ -10,6 +10,28 @@ import { latest, pickup, pickupMessage, type PickupResult } from "../src/pickup.
 import { connectV1Target } from "../src/cli.js";
 import { startDaemon, type DaemonTarget } from "../src/daemon.js";
 import { openStore } from "../src/keystore.js";
+import { slotKey } from "../src/routes.js";
+
+/** VCs in these tests carry no scope, so they go to the `default` route (§15). */
+const slot = (url: string) => slotKey(url, "default");
+
+/** A sleep the test controls: `tick()` ends the current sleep and waits until the pickup loop sleeps again. */
+function clock() {
+  const slept: number[] = [];
+  let wake: (() => void) | undefined;
+  let asleep: (() => void) | undefined;
+  return {
+    slept,
+    sleep: (ms: number) => new Promise<void>((r) => { slept.push(ms); wake = r; asleep?.(); asleep = undefined; }),
+    async tick(): Promise<void> {
+      const next = new Promise<void>((r) => (asleep = r));
+      const w = wake;
+      wake = undefined;
+      w?.();
+      await Promise.race([next, new Promise((r) => setTimeout(r, 1000))]);   // the loop may have stopped
+    },
+  };
+}
 
 const closers: Array<() => unknown> = [];
 afterEach(async () => {
@@ -69,7 +91,7 @@ describe("pickup (spec §8)", () => {
     expect(pickupMessage({ error: "unknown_agent" }, "https://rp")).toContain("add https://rp --verifier");
   });
 
-  it("latest picks the delegation that lasts longest", () => {
+  it("latest picks the newest; without iat, the one that lasts longest", () => {
     expect(latest([{ delegationId: "a", credential: "a", scope: [], exp: 5 }, { delegationId: "b", credential: "b", scope: [], exp: 9 }])?.delegationId).toBe("b");
     expect(latest([])).toBeNull();
   });
@@ -89,10 +111,10 @@ describe("a /1 target picks up its delegation (spec §8 → §9 → §10)", () =
     const target: DaemonTarget = { alias: "m", targetMcpUrl: rp + "/api/mcp", auth: null };
     return { store, key, verifier, rp, target, data: store.load()! };
   }
-  const call = async (target: DaemonTarget) => {
+  const call = async (target: DaemonTarget, path = "/mcp") => {
     const daemon = await startDaemon({ targets: [target], token: "t", port: 0 });
     closers.push(() => daemon.close());
-    const r = await fetch(`http://127.0.0.1:${daemon.port}/mcp`, { method: "POST", headers: { authorization: "Bearer t" }, body: "{}" });
+    const r = await fetch(`http://127.0.0.1:${daemon.port}${path}`, { method: "POST", headers: { authorization: "Bearer t" }, body: "{}" });
     await r.text();
     return r.status;
   };
@@ -103,14 +125,14 @@ describe("a /1 target picks up its delegation (spec §8 → §9 → §10)", () =
       { ok: false, error: "authorization_pending", interval: 1 },
       { ok: true, delegations: [{ delegationId: "d1", credential: vc("1"), scope: [], exp: 1 }] },
     ];
-    const slept: number[] = [];
-    const auth = await connectV1Target(s.target, s.data, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key, {
-      pickup: async () => answers.shift()!,
-      sleep: async (ms) => void slept.push(ms),
+    const c = clock();
+    const rp = await connectV1Target(s.target, s.data, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key, {
+      pickup: async () => answers.shift()!, sleep: c.sleep,
     });
-    closers.push(() => auth?.stop());
-    expect(slept, "pickup polled faster than the default 60 s").toEqual([60_000]);
-    expect(s.store.load()!.credentials?.[s.rp], "the picked-up VC wasn't stored").toBe(vc("1"));
+    closers.push(() => rp.stop());
+    await c.tick();
+    expect(c.slept[0], "pickup polled faster than the default 60 s").toBe(60_000);
+    expect(s.store.load()!.credentials?.[slot(s.rp)], "the picked-up VC wasn't stored").toBe(vc("1"));
     expect(await call(s.target)).toBe(200);
   });
 
@@ -119,22 +141,23 @@ describe("a /1 target picks up its delegation (spec §8 → §9 → §10)", () =
     const old = vc("old");
     const fresh = vc("new");
     let pickups = 0;
-    const deps = {
+    const c = clock();
+    const rp = await connectV1Target(s.target, s.data, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key, {
       // The RP keeps handing back the refused VC (§8: repeatable) until the new one is delivered.
       pickup: async (): Promise<PickupResult> => {
         pickups++;
         return { ok: true, delegations: pickups < 3 ? [{ delegationId: "old", credential: old, scope: [], exp: 1 }]
           : [{ delegationId: "old", credential: old, scope: [], exp: 1 }, { delegationId: "new", credential: fresh, scope: [], exp: 0 }] };
       },
-      sleep: async () => {},
-    };
-    const auth = await connectV1Target(s.target, s.data, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key, deps);
-    closers.push(() => auth?.stop());
+      sleep: c.sleep,
+    });
+    closers.push(() => rp.stop());
     expect(await call(s.target)).toBe(403);   // drop
-    await new Promise((r) => setTimeout(r, 200));
-    expect(pickups, "the dropped VC was re-adopted instead of waiting").toBe(3);
-    expect(s.store.load()!.credentials?.[s.rp]).toBe(fresh);
-    closers.push(() => (s.target.auth as { stop?: () => void } | null)?.stop?.());
+    await c.tick();
+    expect(s.store.load()!.credentials?.[slot(s.rp)], "the dropped VC was re-adopted").toBeUndefined();
+    await c.tick();
+    expect(pickups).toBe(3);
+    expect(s.store.load()!.credentials?.[slot(s.rp)]).toBe(fresh);
   });
 });
 
@@ -159,13 +182,15 @@ describe("pickup follow-ups (minipaas, Briefick, metapass-saas on #48/#49)", () 
       { ok: true, delegations: [{ delegationId: "old", credential: old, scope: [], exp: 9 }, { delegationId: "new", credential: fresh, scope: [], exp: 1 }] },
     ];
     const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
+    const c = clock();
     // The verifier is unreachable on purpose: only which VC was adopted matters here.
-    const auth = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
-      pickup: async () => answers.shift()!, sleep: async () => {},
+    const rp = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
+      pickup: async () => answers.shift()!, sleep: c.sleep,
     });
-    closers.push(() => auth?.stop());
-    expect(answers.length, "the dropped VC was adopted on the first pickup").toBe(0);
-    expect(s.load()!.credentials?.["https://rp"]).toBe(fresh);
+    closers.push(() => rp.stop());
+    expect(s.load()!.credentials?.[slot("https://rp")], "the dropped VC was adopted on the first pickup").toBeUndefined();
+    await c.tick();
+    expect(s.load()!.credentials?.[slot("https://rp")]).toBe(fresh);
   });
 
   it("an RP without §8 (pickup 404) stops polling and says credentials import", async () => {
@@ -174,14 +199,17 @@ describe("pickup follow-ups (minipaas, Briefick, metapass-saas on #48/#49)", () 
     expect(await pickup({ url, key })).toEqual({ ok: false, error: "no_pickup" });
     const { s } = await store();
     let calls = 0;
-    let sleeps = 0;
+    const c = clock();
     const target: DaemonTarget = { alias: "b", targetMcpUrl: url + "/api/mcp", auth: null };
-    const auth = await connectV1Target(target, s.load()!, { alias: "b", url, verifierUrl: url }, s, key, {
-      pickup: async () => { calls++; return pickup({ url, key }); },
-      sleep: async () => { if (++sleeps > 1) throw new Error("it kept polling after two 404s"); },
+    const rp = await connectV1Target(target, s.load()!, { alias: "b", url, verifierUrl: url }, s, key, {
+      pickup: async () => { calls++; return pickup({ url, key }); }, sleep: c.sleep,
     });
-    expect(auth).toBeNull();
+    closers.push(() => rp.stop());
+    await c.tick();
+    await c.tick();
+    expect(rp.routes.size).toBe(0);
     expect(calls, "it gave up on one 404 (a deploy can produce one) or polled past two").toBe(2);
+    expect(c.slept.length, "it kept polling after two 404s").toBe(1);
     expect(target.pendingReason).toContain("credentials import");
   });
 });
@@ -199,11 +227,13 @@ it("one 404 between answers doesn't park pickup (Briefick, #51)", async () => {
     { ok: true, delegations: [{ delegationId: "d", credential: vc("after-404s"), scope: [], exp: 1 }] },
   ];
   const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
-  const auth = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
-    pickup: async () => answers.shift()!, sleep: async () => {},
+  const c = clock();
+  const rp = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
+    pickup: async () => answers.shift()!, sleep: c.sleep,
   });
-  closers.push(() => auth?.stop());
-  expect(s.load()!.credentials?.["https://rp"], "two non-consecutive 404s parked pickup").toBe(vc("after-404s"));
+  closers.push(() => rp.stop());
+  for (let i = 0; i < 3; i++) await c.tick();
+  expect(s.load()!.credentials?.[slot("https://rp")], "two non-consecutive 404s parked pickup").toBe(vc("after-404s"));
 });
 
 describe("metapass-saas's #51 findings", () => {
@@ -216,7 +246,7 @@ describe("metapass-saas's #51 findings", () => {
     return { s, key };
   }
 
-  it("B1: a VC dropped while the store no longer holds it is not re-presented in a loop", async () => {
+  it("B1: a refused VC that pickup keeps handing back is exchanged once, not in a loop", async () => {
     const { s, key } = await fresh();
     let tokenCalls = 0;
     const verifier = await server((req, _b, res) => {
@@ -225,16 +255,16 @@ describe("metapass-saas's #51 findings", () => {
       json(res, 400, { error: "invalid_delegation" });
     });
     const refused = vc("refused");
-    const data = { ...s.load()!, credentials: { "https://rp": refused } };   // in memory only: `credentials clear` ran
     const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
-    const sleeps: number[] = [];
-    await connectV1Target(target, data, { alias: "m", url: "https://rp", verifierUrl: verifier }, s, key, {
+    const c = clock();
+    const rp = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: verifier }, s, key, {
       pickup: async () => ({ ok: true, delegations: [{ delegationId: "r", credential: refused, scope: [], exp: 1 }] }),
-      sleep: async (ms) => { sleeps.push(ms); if (sleeps.length > 3) await new Promise(() => {}); },
+      sleep: c.sleep,
     });
-    await new Promise((r) => setTimeout(r, 300));
+    closers.push(() => rp.stop());
+    for (let i = 0; i < 3; i++) await c.tick();
     expect(tokenCalls, "the refused VC was exchanged again and again").toBe(1);
-    expect(sleeps[0], "the reconnect after a drop didn't wait an interval").toBe(60_000);
+    expect(c.slept.every((ms) => ms === 60_000), "pickup passes didn't wait an interval").toBe(true);
   });
 
   it("B2: an error between two 404s breaks the run", async () => {
@@ -244,43 +274,41 @@ describe("metapass-saas's #51 findings", () => {
       { ok: true, delegations: [{ delegationId: "d", credential: vc("b2"), scope: [], exp: 1 }] },
     ];
     const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
-    const auth = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
-      pickup: async () => { const a = answers.shift()!; if (a instanceof Error) throw a; return a; }, sleep: async () => {},
+    const c = clock();
+    const rp = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
+      pickup: async () => { const a = answers.shift()!; if (a instanceof Error) throw a; return a; }, sleep: c.sleep,
     });
-    closers.push(() => auth?.stop());
-    expect(s.load()!.credentials?.["https://rp"], "404 → error → 404 parked pickup").toBe(vc("b2"));
+    closers.push(() => rp.stop());
+    for (let i = 0; i < 3; i++) await c.tick();
+    expect(s.load()!.credentials?.[slot("https://rp")], "404 → error → 404 parked pickup").toBe(vc("b2"));
   });
 
   it.each([Infinity, NaN, -5, 0, 1e9])("A2: interval %s never takes the poll below 60 s or above an hour", async (bad) => {
     const { s, key } = await fresh();
-    const answers: PickupResult[] = [
-      { ok: false, error: "slow_down", interval: bad },
-      { ok: true, delegations: [{ delegationId: "d", credential: vc("a2"), scope: [], exp: 1 }] },
-    ];
-    const slept: number[] = [];
+    const c = clock();
     const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
-    const auth = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
-      pickup: async () => answers.shift()!, sleep: async (ms) => void slept.push(ms),
+    const rp = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
+      pickup: async () => ({ ok: false, error: "slow_down", interval: bad }), sleep: c.sleep,
     });
-    closers.push(() => auth?.stop());
-    expect(slept[0]).toBeGreaterThanOrEqual(60_000);
-    expect(slept[0]).toBeLessThanOrEqual(3_600_000);
+    closers.push(() => rp.stop());
+    expect(c.slept[0]).toBeGreaterThanOrEqual(60_000);
+    expect(c.slept[0]).toBeLessThanOrEqual(3_600_000);
   });
 
   it("21 dropped, still-live VCs are all remembered: none is re-adopted", async () => {
     const { vcDigest } = await import("../src/cli.js");
     const { s, key } = await fresh();
     const many = Array.from({ length: 21 }, (_, i) => vc("d" + i));
-    s.save({ ...s.load()!, dropped: { "https://rp": many.map((c) => ({ digest: vcDigest(c), exp: null })) } });
-    let pickups = 0;
+    s.save({ ...s.load()!, dropped: { "https://rp": many.map((cr) => ({ digest: vcDigest(cr), exp: null })) } });
+    const c = clock();
     const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
-    const run = connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
-      pickup: async () => { pickups++; return { ok: true, delegations: many.map((c, i) => ({ delegationId: "d" + i, credential: c, scope: [], exp: 1 })) }; },
-      sleep: async () => { if (pickups >= 3) await new Promise(() => {}); },
+    const rp = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
+      pickup: async () => ({ ok: true, delegations: many.map((cr, i) => ({ delegationId: "d" + i, credential: cr, scope: [], exp: 1 })) }),
+      sleep: c.sleep,
     });
-    void run;
-    await new Promise((r) => setTimeout(r, 100));
-    expect(s.load()!.credentials?.["https://rp"], "a dropped VC beyond a count cap was re-adopted").toBeUndefined();
+    closers.push(() => rp.stop());
+    await c.tick();
+    expect(s.load()!.credentials?.[slot("https://rp")], "a dropped VC beyond a count cap was re-adopted").toBeUndefined();
   });
 });
 
@@ -306,27 +334,26 @@ describe("metapass-saas's #51 follow-ups", () => {
     const data = { ...s.load()!, credentials: { "https://rp": refused } };
     const unreadable = { ...s, load: () => null, save: () => {} };
     const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
-    let sleeps = 0;
-    await connectV1Target(target, data, { alias: "m", url: "https://rp", verifierUrl: verifier }, unreadable, key, {
+    const c = clock();
+    const rp = await connectV1Target(target, data, { alias: "m", url: "https://rp", verifierUrl: verifier }, unreadable, key, {
       pickup: async () => ({ ok: true, delegations: [{ delegationId: "r", credential: refused, scope: [], exp: 1 }] }),
-      sleep: async () => { if (++sleeps > 4) await new Promise(() => {}); },
+      sleep: c.sleep,
     });
-    await new Promise((r) => setTimeout(r, 300));
+    closers.push(() => rp.stop());
+    await new Promise((r) => setTimeout(r, 200));   // the drop
+    for (let i = 0; i < 3; i++) await c.tick();
     expect(tokenCalls, "with an unreadable store the dropped VC was exchanged again").toBe(1);
   });
 
   it("a pickup that throws waits the interval before the next try", async () => {
     const { s, key } = await fresh();
-    const slept: number[] = [];
-    const answers: Array<PickupResult | Error> = [new Error("ECONNRESET"),
-      { ok: true, delegations: [{ delegationId: "d", credential: vc("after-throw"), scope: [], exp: 1 }] }];
+    const c = clock();
     const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
-    const auth = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
-      pickup: async () => { const a = answers.shift()!; if (a instanceof Error) throw a; return a; },
-      sleep: async (ms) => void slept.push(ms),
+    const rp = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: "http://127.0.0.1:9" }, s, key, {
+      pickup: async () => { throw new Error("ECONNRESET"); }, sleep: c.sleep,
     });
-    closers.push(() => auth?.stop());
-    expect(slept, "a thrown pickup retried without waiting").toEqual([60_000]);
+    closers.push(() => rp.stop());
+    expect(c.slept, "a thrown pickup retried without waiting").toEqual([60_000]);
   });
 
   it("an expired dropped VC is forgotten; never-expiring ones are capped", async () => {
@@ -334,20 +361,20 @@ describe("metapass-saas's #51 follow-ups", () => {
     const { s, key } = await fresh();
     const past = Math.floor(Date.now() / 1000) - 10;
     const nulls = Array.from({ length: DROPPED_WITHOUT_EXP_KEPT + 5 }, (_, i) => ({ digest: "n" + i, exp: null }));
-    s.save({ ...s.load()!, dropped: { "https://rp": [{ digest: "expired", exp: past }, ...nulls] } });
+    const refused = vc("newest");
+    s.save({ ...s.load()!, credentials: { "https://rp": refused }, dropped: { "https://rp": [{ digest: "expired", exp: past }, ...nulls] } });
     let tokenCalls = 0;
     const verifier = await server((req, _b, res) => {
       if (req.url === "/agent/nonce") return json(res, 200, { c_nonce: "n" });
       tokenCalls++;
       json(res, 400, { error: "invalid_delegation" });
     });
-    const refused = vc("newest");
     const target: DaemonTarget = { alias: "m", targetMcpUrl: "https://rp/api/mcp", auth: null };
-    await connectV1Target(target, { ...s.load()!, credentials: { "https://rp": refused } },
-      { alias: "m", url: "https://rp", verifierUrl: verifier }, s, key, {
-        pickup: async () => ({ ok: false, error: "authorization_pending" }),
-        sleep: async () => { await new Promise(() => {}); },
-      });
+    const c = clock();
+    const rp = await connectV1Target(target, s.load()!, { alias: "m", url: "https://rp", verifierUrl: verifier }, s, key, {
+      pickup: async () => ({ ok: false, error: "authorization_pending" }), sleep: c.sleep,
+    });
+    closers.push(() => rp.stop());
     await new Promise((r) => setTimeout(r, 200));
     const kept = s.load()!.dropped!["https://rp"];
     expect(kept.some((d) => d.digest === "expired"), "an expired entry was kept").toBe(false);

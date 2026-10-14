@@ -58,9 +58,30 @@ export async function pickup(o: PickupOptions): Promise<PickupResult> {
   throw new Error(`pickup ${res.status}${json ? ": " + JSON.stringify(json).slice(0, 200) : ""}`);
 }
 
-/** The delegation to use when several are live (§15 isn't built): the one that lasts longest. */
+/** A VC's `iat` (epoch s), or null when it has none. */
+export function vcIat(vc: string): number | null {
+  try {
+    const iat = (JSON.parse(Buffer.from(vc.split(".")[1] ?? "", "base64url").toString("utf8")) as { iat?: unknown }).iat;
+    return typeof iat === "number" && Number.isFinite(iat) ? iat : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `a` is newer than `b`: issued later (`iat`), else, when either lacks one, ends later (`exp`). A tie is not
+ * newer. A deliberate narrower or shorter delegation is the user's latest intent, so issuance wins (Briefick, #54).
+ */
+export function isNewer(a: { credential: string; exp: number | null }, b: { credential: string; exp: number | null }): boolean {
+  const ai = vcIat(a.credential);
+  const bi = vcIat(b.credential);
+  if (ai !== null && bi !== null) return ai > bi;
+  return (a.exp ?? 0) > (b.exp ?? 0);
+}
+
+/** The newest of several live delegations ({@link isNewer}); on a tie, the first. */
 export function latest(delegations: PickedDelegation[]): PickedDelegation | null {
-  return delegations.reduce<PickedDelegation | null>((best, d) => (!best || (d.exp ?? 0) > (best.exp ?? 0) ? d : best), null);
+  return delegations.reduce<PickedDelegation | null>((best, d) => (!best || isNewer(d, best) ? d : best), null);
 }
 
 /** What to tell the user for a refusal (§8: a different text for each). */
