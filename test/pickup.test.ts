@@ -264,6 +264,7 @@ describe("metapass-saas's #51 findings", () => {
     closers.push(() => rp.stop());
     for (let i = 0; i < 3; i++) await c.tick();
     expect(tokenCalls, "the refused VC was exchanged again and again").toBe(1);
+    expect(c.slept.length, "no pickup pass waited at all").toBeGreaterThanOrEqual(3);
     expect(c.slept.every((ms) => ms === 60_000), "pickup passes didn't wait an interval").toBe(true);
   });
 

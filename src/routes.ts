@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Spec agent-delegation §15: several live delegations at one RP, each a separate daemon route
  * `127.0.0.1:<port>/<alias>/<route>/mcp`. A route is named by the delegation's first scope unless the user renamed it,
@@ -7,11 +9,18 @@
 /** Separates the RP URL from the route in store keys (`credentials`, `held`). A URL has no `|` unescaped. */
 const SEP = "|";
 
-/** Route names are path segments: letters, digits, `.`, `_`, `-`; anything else becomes `-`. */
+/**
+ * Route names are path segments: letters, digits, `.`, `_`, `-`. A name that had to change also gets a short hash of
+ * the original, so `read:x`, `read/x` and `read-x` stay three routes, and two non-ASCII scopes stay two
+ * (metapass-saas, #54).
+ */
 export function sanitizeRoute(name: string): string {
+  if (name === "") return "default";
   const s = name.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
-  if (s === "" || s === "." || s === "..") return "default";
-  return s === "mcp" ? "mcp-route" : s;   // `/<alias>/mcp/mcp` would read as the RP-level path
+  if (s === name && s !== "." && s !== ".." && s !== "mcp") return s;
+  const tag = createHash("sha256").update(name, "utf8").digest("hex").slice(0, 6);
+  // `mcp` is reserved: `/<alias>/mcp/mcp` would read as the RP-level path.
+  return s === "" || s === "." || s === ".." ? `r-${tag}` : `${s}-${tag}`;
 }
 
 /** The default route of a delegation: its first scope (§15). */
