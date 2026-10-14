@@ -87,12 +87,15 @@ async function daemonFor(target: DaemonTarget) {
 }
 
 describe("§15 multiple delegations: one daemon route each", () => {
-  it("route names are path segments, never `mcp`", () => {
+  it("route names are path segments, never `mcp`, and a changed name never collides", () => {
     expect(sanitizeRoute("paas.deploy")).toBe("paas.deploy");
-    expect(sanitizeRoute("a b/c")).toBe("a-b-c");
     expect(sanitizeRoute("")).toBe("default");
-    expect(sanitizeRoute("..")).toBe("default");
-    expect(sanitizeRoute("mcp")).toBe("mcp-route");
+    expect(sanitizeRoute("a b/c")).toMatch(/^a-b-c-[0-9a-f]{6}$/);
+    expect(sanitizeRoute("..")).toMatch(/^r-[0-9a-f]{6}$/);
+    expect(sanitizeRoute("mcp")).toMatch(/^mcp-[0-9a-f]{6}$/);
+    const names = ["read:x", "read/x", "read-x", "읽기", "쓰기"].map(sanitizeRoute);
+    expect(new Set(names).size, `routes collided: ${names}`).toBe(5);
+    for (const n of names) expect(n).toMatch(/^[A-Za-z0-9._-]+$/);
   });
 
   it("reads scope from the plain claim, else from a disclosure", () => {
@@ -245,6 +248,91 @@ describe("§15 review fixes (Briefick, #54)", () => {
     expect(await main(["route", "rename", "--url", s.rp, "a", "b", "--key-file", s.keyFile]),
       "renamed onto a scope's default route that is stored here").toBe(1);
     expect(await main(["route", "rename", "--url", s.rp, "a", "c", "--key-file", s.keyFile])).toBe(0);
+  });
+});
+
+describe("§15 follow-ups (metapass-saas, #54)", () => {
+  const pick = (credential: string, scope: string[], exp = 9) => ({ delegationId: credential.slice(-8), credential, scope, exp });
+
+  it("migration keeps the newer VC when the route already holds one (downgrade → re-upgrade)", async () => {
+    const s = await setup();
+    const legacy = vc(["read"], 9, "legacy-0.7.0", 100);
+    const newer = vc(["read"], 9, "already-routed", 200);
+    s.store.save({ ...s.store.load()!, credentials: { [s.rp]: legacy, [slotKey(s.rp, "read")]: newer } });
+    const v1 = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key);
+    closers.push(() => v1.stop());
+    expect(s.store.load()!.credentials, "migration overwrote the newer routed VC").toEqual({ [slotKey(s.rp, "read")]: newer });
+  });
+
+  it("an in-memory migration followed by a write doesn't bring the old VC back on restart", async () => {
+    const s = await setup();
+    const legacy = vc(["read"], 9, "legacy", 100);
+    const picked = vc(["read"], 9, "picked", 200);
+    // The legacy key is still on disk (the first run migrated only in memory), next to the route a pickup wrote.
+    s.store.save({ ...s.store.load()!, credentials: { [s.rp]: legacy, [slotKey(s.rp, "read")]: picked } });
+    const v1 = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key);
+    closers.push(() => v1.stop());
+    expect(s.store.load()!.credentials?.[slotKey(s.rp, "read")], "a restart put the older VC back").toBe(picked);
+  });
+
+  it("a held legacy VC stays held on its route", async () => {
+    const s = await setup();
+    const legacy = vc(["read"], 9, "held");
+    const record = { credential: legacy, reason: "constraints_unknown_key", keys: ["k"] };
+    s.store.save({ ...s.store.load()!, credentials: { [s.rp]: legacy }, held: { [s.rp]: record } });
+    const v1 = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key);
+    closers.push(() => v1.stop());
+    expect(s.store.load()!.held, "the hold was lost in migration").toEqual({ [slotKey(s.rp, "read")]: record });
+    expect(v1.routes.get("read")?.auth, "a held VC was presented after migration").toBeNull();
+    expect(s.exchanged.length).toBe(0);
+  });
+
+  it("the route name comes from the VC's own scope, not the pickup body's", async () => {
+    const s = await setup();
+    const c = clock();
+    const credential = vc(["read"], 9, "claim");
+    const v1 = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key, {
+      pickup: async () => ({ ok: true, delegations: [pick(credential, ["something-else"])] }), sleep: c.sleep,
+    });
+    closers.push(() => v1.stop());
+    expect([...v1.routes.keys()]).toEqual(["read"]);
+  });
+
+  it("a delegation that doesn't change isn't re-exchanged on every pickup pass", async () => {
+    const s = await setup();
+    const c = clock();
+    const credential = vc(["read"], 9, "stable");
+    const v1 = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key, {
+      pickup: async () => ({ ok: true, delegations: [pick(credential, ["read"])] }), sleep: c.sleep,
+    });
+    closers.push(() => v1.stop());
+    for (let i = 0; i < 3; i++) await c.tick();
+    expect(s.exchanged.length, "each pass reconnected the same delegation").toBe(1);
+  });
+
+  it("a stored VC already refused is not connected at startup", async () => {
+    const { vcDigest } = await import("../src/cli.js");
+    const s = await setup();
+    const refused = vc(["read"], 9, "refused");
+    s.store.save({ ...s.store.load()!, credentials: { [slotKey(s.rp, "read")]: refused },
+      dropped: { [s.rp]: [{ digest: vcDigest(refused), exp: null }] } });
+    const v1 = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key);
+    closers.push(() => v1.stop());
+    expect(v1.routes.size, "a refused VC got a route at startup").toBe(0);
+    expect(s.exchanged.length).toBe(0);
+  });
+
+  it("stop() ends pickup", async () => {
+    const s = await setup();
+    const c = clock();
+    let pickups = 0;
+    const v1 = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key, {
+      pickup: async () => { pickups++; return { ok: false, error: "authorization_pending" }; }, sleep: c.sleep,
+    });
+    v1.stop();
+    await c.tick();
+    await c.tick();
+    expect(pickups, "pickup kept running after stop()").toBe(1);
   });
 });
 

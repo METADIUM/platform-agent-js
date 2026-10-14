@@ -641,11 +641,15 @@ function migrateLegacyCredential(store: AgentStore, data: KeyStore, url: string)
     if (!vc) return;
     const slot = slotKey(url, routeFor(vcScope(vc), s.routeNames?.[url]));
     const { [url]: _c, ...credentials } = s.credentials!;
-    s.credentials = { ...credentials, [slot]: vc };
+    // The route may already hold a VC: after a downgrade and re-upgrade, or when an earlier run migrated only in
+    // memory. Keep the newer one, never overwrite blindly (metapass-saas, #54).
+    const there = credentials[slot];
+    const keepLegacy = !there || isNewer({ credential: vc, exp: vcExp(vc) }, { credential: there, exp: vcExp(there) });
+    s.credentials = keepLegacy ? { ...credentials, [slot]: vc } : credentials;
     const h = s.held?.[url];
     if (h) {
       const { [url]: _h, ...held } = s.held!;
-      s.held = { ...held, ...(h.credential === vc ? { [slot]: h } : {}) };
+      s.held = { ...held, ...(h.credential === vc && keepLegacy ? { [slot]: h } : {}) };
     }
   };
   try {
@@ -795,7 +799,10 @@ export async function connectV1Target(
         for (const d of r.delegations) {
           // Persisted, so a restart doesn't re-adopt a VC this agent already saw refused (minipaas, Briefick).
           if (isDropped(store, data, rp.url, d.credential)) continue;
-          const route = routeFor(d.scope, names);
+          // One source for the route name: the VC's own scope claim, as import and migration read it; the pickup
+          // body's `scope` only when the VC has none (metapass-saas, #54: two sources served one VC on two routes).
+          const claimed = vcScope(d.credential);
+          const route = routeFor(claimed.length > 0 ? claimed : d.scope, names);
           byRoute.set(route, [...(byRoute.get(route) ?? []), d]);
         }
         for (const [route, ds] of byRoute) {
