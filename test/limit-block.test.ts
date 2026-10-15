@@ -57,6 +57,13 @@ describe("mcpRefusalBody", () => {
     const sse = `event: message\ndata: ${result(true, JSON.stringify(body))}\n\n`;
     expect(mcpRefusalBody(Buffer.from(sse), "text/event-stream")).toEqual(body);
   });
+  it("joins an SSE event's data lines before parsing", () => {
+    const body = limit({ resets: "never" });
+    const json = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { isError: true, content: [{ type: "text", text: JSON.stringify(body) }] } }, null, 1);
+    const sse = `event: message\n${json.split("\n").map((l) => `data: ${l}`).join("\n")}\n\nevent: ping\ndata: {}\n\n`;
+    expect(mcpRefusalBody(Buffer.from(sse), "text/event-stream")).toEqual(body);
+  });
+
   it("is null for a result that isn't an error, or prose", () => {
     expect(mcpRefusalBody(Buffer.from(result(false, JSON.stringify(limit({})))), "application/json")).toBeNull();
     expect(mcpRefusalBody(Buffer.from(result(true, "권한 거부(hours_cap_exceeded)")), "application/json")).toBeNull();
@@ -150,6 +157,18 @@ describe("daemon: the same call is not repeated before retry_at", () => {
     await send(call({ app: "y" }, "log_work", 3));
     expect(up.seen.length, "a call with other arguments was blocked too").toBe(2);
     expect(s.state().status, "limit_reached must neither drop nor hold the VC").not.toMatch(/dropped|held/);
+  });
+
+  it("starts a new delegation on the same route with no blocks", async () => {
+    const up = await rp(() => ({ status: 200, body: isError(limit({ resets: "at", retry_at: retryAt() })) }));
+    const target = { alias: "a", targetMcpUrl: up.url, auth: await session() as DelegationSessionAuth | null };
+    daemon = await startDaemon({ targets: [target], token: "t", port: 0 });
+    await send(call({}));
+    await send(call({}));
+    expect(up.seen.length).toBe(1);
+    target.auth = await session();   // what connectRoute does when pickup brings a newer VC for this route
+    await send(call({}));
+    expect(up.seen.length, "a new delegation, which resets the quota, was still blocked by the old one").toBe(2);
   });
 
   it("does the same for a 403 limit_reached", async () => {

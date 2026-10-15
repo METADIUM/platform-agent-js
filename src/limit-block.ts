@@ -52,8 +52,10 @@ export function limitRefusal(body: unknown, now: number): LimitRefusal | null {
  */
 export function mcpRefusalBody(raw: Buffer, contentType: string | undefined): unknown {
   const text = raw.toString("utf8");
+  // SSE: one event per blank-line-separated block; its `data:` lines join with "\n" (one leading space dropped).
   const messages = /text\/event-stream/i.test(contentType ?? "")
-    ? text.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim())
+    ? text.split(/\r?\n\r?\n/).map((event) => event.split(/\r?\n/).filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).replace(/^ /, "")).join("\n")).filter((m) => m !== "")
     : [text];
   for (const m of messages) {
     try {

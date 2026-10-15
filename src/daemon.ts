@@ -246,17 +246,20 @@ function portInUse(host: string, port: number): Promise<boolean> {
   });
 }
 
-/** §11.1 `limit_reached`: each delegation's calls blocked until their `retry_at`. */
-const limitBlocks = new WeakMap<DaemonTarget, LimitBlocks>();
+/**
+ * §11.1 `limit_reached`: calls blocked until their `retry_at`, per delegation. Keyed by the route's auth, which is new
+ * for every VC: a new delegation resets the quota, so it starts with no blocks (Briefick on #57).
+ */
+const limitBlocks = new WeakMap<object, LimitBlocks>();
 
-function blocksOf(target: DaemonTarget): LimitBlocks {
-  let b = limitBlocks.get(target);
-  if (!b) limitBlocks.set(target, (b = new LimitBlocks()));
+function blocksOf(auth: object): LimitBlocks {
+  let b = limitBlocks.get(auth);
+  if (!b) limitBlocks.set(auth, (b = new LimitBlocks()));
   return b;
 }
 
 /** 대상 RP로 투명 포워딩 — Authorization만 해당 RP의 최신 bearer로 교체(SSE 응답 스트림 유지). */
-function recordLimit(target: DaemonTarget, key: string, body: unknown): void {
+function recordLimit(auth: object, key: string, body: unknown): void {
   let parsed = body;
   if (typeof body === "string") {
     try {
@@ -266,7 +269,7 @@ function recordLimit(target: DaemonTarget, key: string, body: unknown): void {
     }
   }
   const refusal = limitRefusal(parsed, Date.now());
-  if (refusal) blocksOf(target).record(key, refusal);
+  if (refusal) blocksOf(auth).record(key, refusal);
 }
 
 async function forward(
@@ -288,7 +291,7 @@ async function forward(
   const auth = target.auth!;
   const call = isCallAuth(auth) ? callKey(body) : null;
   if (call) {
-    const standing = blocksOf(target).standing(call.key);
+    const standing = blocksOf(auth).standing(call.key);
     if (standing) {
       // §11.1: the same call before retry_at is answered here; the RP is not asked again.
       cres.writeHead(200, { "content-type": "application/json" });
@@ -355,7 +358,7 @@ async function forward(
           try {
             const raw = size <= MAX_REFUSAL_BODY ? Buffer.concat(chunks) : null;
             const refusal = raw ? constraintDenial(raw) : null;
-            if (call && raw) recordLimit(target, call.key, raw.toString("utf8"));
+            if (call && raw) recordLimit(auth, call.key, raw.toString("utf8"));
             if (refusal) {
               const action = constraintRefusalAction([refusal.reason]);
               if (action) auth.refused?.(action, refusal.reason, refusal.keys, refusal.keysTotal);
@@ -382,7 +385,7 @@ async function forward(
           if (size > MAX_REFUSAL_BODY) return;
           try {
             const body = mcpRefusalBody(Buffer.concat(seen), pres.headers["content-type"]);
-            if (body) recordLimit(target, call.key, body);
+            if (body) recordLimit(auth, call.key, body);
           } catch (e) {
             console.error(`[${target.alias}] reading a tool refusal failed:`, e);
           }
