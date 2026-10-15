@@ -18,6 +18,7 @@ import { URL } from "node:url";
 import type { BearerSource } from "./proxy.js";
 import { isCallAuth, SessionUnavailable, type CallAuth } from "./delegation-session.js";
 import { constraintRefusalAction } from "./constraint-refusal.js";
+import { LimitBlocks, blockedAnswer, callKey, limitRefusal, mcpRefusalBody } from "./limit-block.js";
 
 export interface DaemonTarget {
   alias: string;
@@ -245,7 +246,34 @@ function portInUse(host: string, port: number): Promise<boolean> {
   });
 }
 
+/**
+ * §11.1 `limit_reached`: calls blocked until their `retry_at`, per delegation. Keyed by the route's auth, which is new
+ * for every VC: a new delegation resets the quota, so it starts with no blocks (Briefick on #57).
+ */
+const limitBlocks = new WeakMap<object, LimitBlocks>();
+
+function blocksOf(auth: object): LimitBlocks {
+  let b = limitBlocks.get(auth);
+  if (!b) limitBlocks.set(auth, (b = new LimitBlocks()));
+  return b;
+}
+
 /** 대상 RP로 투명 포워딩 — Authorization만 해당 RP의 최신 bearer로 교체(SSE 응답 스트림 유지). */
+function recordLimit(auth: object, alias: string, call: { key: string; name: string }, status: number, body: unknown): void {
+  let parsed = body;
+  if (typeof body === "string") {
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return;
+    }
+  }
+  const refusal = limitRefusal(parsed, Date.now());
+  if (!refusal) return;
+  blocksOf(auth).record(call.key, { ...refusal, status });
+  console.error(`[${alias}] limit_reached: ${call.name} with these arguments is answered locally until ${new Date(refusal.retryAt).toISOString()}`);
+}
+
 async function forward(
   target: DaemonTarget,
   restPath: string,
@@ -263,6 +291,16 @@ async function forward(
   headers["host"] = url.host;
   headers["content-length"] = String(body.length);
   const auth = target.auth!;
+  const call = isCallAuth(auth) ? callKey(body) : null;
+  if (call) {
+    const standing = blocksOf(auth).standing(call.key);
+    if (standing) {
+      // §11.1: the same call before retry_at is answered here, as the RP answered it; the RP is not asked again.
+      const a = blockedAnswer(call.id, standing);
+      cres.writeHead(a.status, a.body ? { "content-type": "application/json" } : {});
+      return void cres.end(a.body);
+    }
+  }
   if (isCallAuth(auth)) {
     // An encoded 403 couldn't be read for its §10 reason, so ask /1 RPs for an identity body (metapass-saas).
     delete headers["accept-encoding"];
@@ -321,7 +359,9 @@ async function forward(
         pres.on("error", () => cres.destroy());
         pres.on("end", () => {
           try {
-            const refusal = size <= MAX_REFUSAL_BODY ? constraintDenial(Buffer.concat(chunks)) : null;
+            const raw = size <= MAX_REFUSAL_BODY ? Buffer.concat(chunks) : null;
+            const refusal = raw ? constraintDenial(raw) : null;
+            if (call && raw) recordLimit(auth, target.alias, call, 403, raw.toString("utf8"));
             if (refusal) {
               const action = constraintRefusalAction([refusal.reason]);
               if (action) auth.refused?.(action, refusal.reason, refusal.keys, refusal.keysTotal);
@@ -336,6 +376,24 @@ async function forward(
         return;
       }
       cres.writeHead(pres.statusCode ?? 502, pres.headers);
+      if (call && pres.statusCode === 200) {
+        // §10: a tool's own refusal is an isError result at 200. Read a copy as it passes; the client isn't held.
+        const seen: Buffer[] = [];
+        let size = 0;
+        pres.on("data", (c: Buffer) => {
+          size += c.length;
+          if (size <= MAX_REFUSAL_BODY) seen.push(c);
+        });
+        pres.on("end", () => {
+          if (size > MAX_REFUSAL_BODY) return;
+          try {
+            const body = mcpRefusalBody(Buffer.concat(seen), pres.headers["content-type"]);
+            if (body) recordLimit(auth, target.alias, call, 200, body);
+          } catch (e) {
+            console.error(`[${target.alias}] reading a tool refusal failed:`, e);
+          }
+        });
+      }
       pres.pipe(cres);
     },
   );
