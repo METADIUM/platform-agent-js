@@ -18,7 +18,7 @@ import { URL } from "node:url";
 import type { BearerSource } from "./proxy.js";
 import { isCallAuth, SessionUnavailable, type CallAuth } from "./delegation-session.js";
 import { constraintRefusalAction } from "./constraint-refusal.js";
-import { LimitBlocks, blockedMcpAnswer, callKey, limitRefusal, mcpRefusalBody } from "./limit-block.js";
+import { LimitBlocks, blockedAnswer, callKey, limitRefusal, mcpRefusalBody } from "./limit-block.js";
 
 export interface DaemonTarget {
   alias: string;
@@ -259,7 +259,7 @@ function blocksOf(auth: object): LimitBlocks {
 }
 
 /** 대상 RP로 투명 포워딩 — Authorization만 해당 RP의 최신 bearer로 교체(SSE 응답 스트림 유지). */
-function recordLimit(auth: object, key: string, body: unknown): void {
+function recordLimit(auth: object, alias: string, call: { key: string; name: string }, status: number, body: unknown): void {
   let parsed = body;
   if (typeof body === "string") {
     try {
@@ -269,7 +269,9 @@ function recordLimit(auth: object, key: string, body: unknown): void {
     }
   }
   const refusal = limitRefusal(parsed, Date.now());
-  if (refusal) blocksOf(auth).record(key, refusal);
+  if (!refusal) return;
+  blocksOf(auth).record(call.key, { ...refusal, status });
+  console.error(`[${alias}] limit_reached: ${call.name} with these arguments is answered locally until ${new Date(refusal.retryAt).toISOString()}`);
 }
 
 async function forward(
@@ -293,9 +295,10 @@ async function forward(
   if (call) {
     const standing = blocksOf(auth).standing(call.key);
     if (standing) {
-      // §11.1: the same call before retry_at is answered here; the RP is not asked again.
-      cres.writeHead(200, { "content-type": "application/json" });
-      return void cres.end(blockedMcpAnswer(call.id, standing));
+      // §11.1: the same call before retry_at is answered here, as the RP answered it; the RP is not asked again.
+      const a = blockedAnswer(call.id, standing);
+      cres.writeHead(a.status, a.body ? { "content-type": "application/json" } : {});
+      return void cres.end(a.body);
     }
   }
   if (isCallAuth(auth)) {
@@ -358,7 +361,7 @@ async function forward(
           try {
             const raw = size <= MAX_REFUSAL_BODY ? Buffer.concat(chunks) : null;
             const refusal = raw ? constraintDenial(raw) : null;
-            if (call && raw) recordLimit(auth, call.key, raw.toString("utf8"));
+            if (call && raw) recordLimit(auth, target.alias, call, 403, raw.toString("utf8"));
             if (refusal) {
               const action = constraintRefusalAction([refusal.reason]);
               if (action) auth.refused?.(action, refusal.reason, refusal.keys, refusal.keysTotal);
@@ -385,7 +388,7 @@ async function forward(
           if (size > MAX_REFUSAL_BODY) return;
           try {
             const body = mcpRefusalBody(Buffer.concat(seen), pres.headers["content-type"]);
-            if (body) recordLimit(auth, call.key, body);
+            if (body) recordLimit(auth, target.alias, call, 200, body);
           } catch (e) {
             console.error(`[${target.alias}] reading a tool refusal failed:`, e);
           }

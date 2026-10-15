@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentKey } from "../src/key.js";
 import { DelegationSessionAuth } from "../src/delegation-session.js";
 import { startDaemon, type RunningDaemon } from "../src/daemon.js";
-import { LimitBlocks, MAX_BLOCKS, callKey, limitRefusal, mcpRefusalBody } from "../src/limit-block.js";
+import { LimitBlocks, MAX_BLOCKS, MAX_BLOCK_MS, blockedAnswer, callKey, limitRefusal, mcpRefusalBody } from "../src/limit-block.js";
 
 const NOW = Date.parse("2026-10-15T12:00:00Z");
 const call = (args: unknown, name = "log_work", id: unknown = 1) =>
@@ -19,6 +19,9 @@ describe("callKey", () => {
   it("differs for other arguments or another tool", () => {
     expect(callKey(call({ hours: 1 }))!.key).not.toBe(callKey(call({ hours: 2 }))!.key);
     expect(callKey(call({ hours: 1 }))!.key).not.toBe(callKey(call({ hours: 1 }, "update_work"))!.key);
+  });
+  it("costs the same whatever the call's size (a hash)", () => {
+    expect(callKey(call({ blob: "x".repeat(1_000_000) }))!.key.length).toBe(callKey(call({}))!.key.length);
   });
   it("is null for anything but one tools/call", () => {
     expect(callKey(Buffer.from('{"method":"tools/list"}'))).toBeNull();
@@ -47,6 +50,15 @@ describe("limitRefusal", () => {
   ])("is advisory (null) for %s", (_, body) => {
     expect(limitRefusal(body, NOW)).toBeNull();
   });
+  it("doesn't block past MAX_BLOCK_MS, or on a date that doesn't exist", () => {
+    const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
+    expect(limitRefusal(limit({ resets: "at", retry_at: iso(NOW + MAX_BLOCK_MS - 60_000) }), NOW)).not.toBeNull();
+    expect(limitRefusal(limit({ resets: "at", retry_at: iso(NOW + MAX_BLOCK_MS + 60_000) }), NOW)).toBeNull();
+    expect(limitRefusal(limit({ resets: "at", retry_at: "9999-12-31T00:00:00Z" }), NOW)).toBeNull();
+    const feb28 = Date.parse("2027-02-28T12:00:00Z");   // 2027 has no Feb 29; Date.parse rolls it to March 1
+    expect(limitRefusal(limit({ resets: "at", retry_at: "2027-02-29T10:00:00Z" }), feb28)).toBeNull();
+    expect(limitRefusal(limit({ resets: "at", retry_at: "2027-03-01T10:00:00Z" }), feb28), "control").not.toBeNull();
+  });
 });
 
 describe("mcpRefusalBody", () => {
@@ -67,6 +79,16 @@ describe("mcpRefusalBody", () => {
   it("is null for a result that isn't an error, or prose", () => {
     expect(mcpRefusalBody(Buffer.from(result(false, JSON.stringify(limit({})))), "application/json")).toBeNull();
     expect(mcpRefusalBody(Buffer.from(result(true, "권한 거부(hours_cap_exceeded)")), "application/json")).toBeNull();
+  });
+});
+
+describe("blockedAnswer", () => {
+  const r = { body: limit({ resets: "at" }), retryAt: NOW + 1000 };
+  it("answers a 403 refusal as a 403, an MCP one as isError, a notification with 202", () => {
+    expect(blockedAnswer(1, { ...r, status: 403 })).toEqual({ status: 403, body: JSON.stringify(r.body) });
+    expect(blockedAnswer(1, { ...r, status: 200 }).status).toBe(200);
+    expect(JSON.parse(blockedAnswer(1, { ...r, status: 200 }).body).result.isError).toBe(true);
+    expect(blockedAnswer(undefined, { ...r, status: 200 })).toEqual({ status: 202, body: "" });
   });
 });
 
@@ -171,12 +193,34 @@ describe("daemon: the same call is not repeated before retry_at", () => {
     expect(up.seen.length, "a new delegation, which resets the quota, was still blocked by the old one").toBe(2);
   });
 
-  it("does the same for a 403 limit_reached", async () => {
-    const up = await rp(() => ({ status: 403, body: JSON.stringify(limit({ resets: "at", retry_at: retryAt() })) }));
+  it("does the same for a 403 limit_reached, and answers the repeat as a 403", async () => {
+    const body = JSON.stringify(limit({ resets: "at", retry_at: retryAt() }));
+    const up = await rp(() => ({ status: 403, body }));
     daemon = await startDaemon({ targets: [{ alias: "a", targetMcpUrl: up.url, auth: await session() }], token: "t", port: 0 });
     expect((await send(call({ n: 1 }))).status).toBe(403);
-    await send(call({ n: 1 }));
+    const again = await send(call({ n: 1 }));
     expect(up.seen.length).toBe(1);
+    expect(again.status, "the repeat must look like the RP's own refusal").toBe(403);
+    expect(again.text).toBe(body);
+  });
+
+  it("keeps one delegation's blocks off another route", async () => {
+    const refusal = isError(limit({ resets: "at", retry_at: retryAt() }));
+    const upA = await rp(() => ({ status: 200, body: refusal }));
+    const upB = await rp(() => ({ status: 200, body: '{"jsonrpc":"2.0","id":1,"result":{}}' }));
+    daemon = await startDaemon({ targets: [
+      { alias: "a", targetMcpUrl: upA.url, auth: await session() },
+      { alias: "b", targetMcpUrl: upB.url, auth: await session() },
+    ], token: "t", port: 0 });
+    const to = (alias: string) => fetch(`http://127.0.0.1:${daemon!.port}/${alias}/mcp`, {
+      method: "POST", headers: { authorization: "Bearer t", "content-type": "application/json" }, body: call({}),
+    }).then((r) => r.text());
+    await to("a");
+    await to("a");
+    await to("b");
+    await to("b");
+    expect(upA.seen.length).toBe(1);
+    expect(upB.seen.length, "route b was blocked by route a's refusal").toBe(2);
   });
 
   it("reads an SSE response", async () => {

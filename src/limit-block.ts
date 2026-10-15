@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Spec agent-delegation §11.1 `limit_reached`: the agent keeps using the VC, and does not repeat the same call
  * before `retry_at`. Only a `resets: "at"` answer with a valid `retry_at` blocks; anything else is advisory.
@@ -9,10 +11,15 @@ const RETRY_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2}
 /** Calls remembered per delegation; the oldest goes first. */
 export const MAX_BLOCKS = 256;
 
+/** A `retry_at` further out than this is not honoured: the call is forwarded again then, and the RP refuses again. */
+export const MAX_BLOCK_MS = 48 * 3600 * 1000;
+
 export interface LimitRefusal {
   /** The §10 body to answer with while the block stands. */
   body: Record<string, unknown>;
   retryAt: number;
+  /** How the RP refused: `403` is answered as a 403, anything else in the MCP `isError` form (§10). */
+  status?: number;
 }
 
 /** JSON with object keys sorted at every level, so equal arguments give one key whatever their order. */
@@ -25,15 +32,26 @@ function canonical(v: unknown): string {
   return JSON.stringify(v) ?? "null";
 }
 
-/** The same call is the same tool with the same arguments; anything but one JSON-RPC `tools/call` has no key. */
-export function callKey(body: Buffer): { key: string; id: unknown } | null {
+/**
+ * The same call is the same tool with the same arguments; anything but one JSON-RPC `tools/call` has no key. The key
+ * is a SHA-256, so a block costs the same whatever the call's size (metapass-saas).
+ */
+export function callKey(body: Buffer): { key: string; id: unknown; name: string } | null {
   try {
     const rpc = JSON.parse(body.toString("utf8")) as { method?: unknown; id?: unknown; params?: { name?: unknown; arguments?: unknown } };
     if (rpc?.method !== "tools/call" || typeof rpc.params?.name !== "string") return null;
-    return { key: `${rpc.params.name}\n${canonical(rpc.params.arguments ?? {})}`, id: rpc.id };
+    const key = createHash("sha256").update(`${rpc.params.name}\n${canonical(rpc.params.arguments ?? {})}`).digest("base64url");
+    return { key, id: rpc.id, name: rpc.params.name };
   } catch {
     return null;
   }
+}
+
+/** The written calendar date exists: Date.parse rolls 2099-02-30 over to March 2 instead of refusing it. */
+function realDate(rfc3339: string): boolean {
+  const [y, m, d] = rfc3339.slice(0, 10).split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
 }
 
 /** A §10 body that blocks the same call, or null (another refusal, or `limit_reached` that is only advisory). */
@@ -43,7 +61,10 @@ export function limitRefusal(body: unknown, now: number): LimitRefusal | null {
   // An inconsistent answer is read as no resets and no retry_at: advisory, never a block (§11.1).
   if (b.resets !== "at" || typeof b.retry_at !== "string" || !RETRY_AT.test(b.retry_at)) return null;
   const retryAt = Date.parse(b.retry_at);
-  return Number.isFinite(retryAt) && retryAt > now ? { body: b, retryAt } : null;
+  // A rolled-over date (2099-02-30 parses as March 2) or a far future is advisory, not a block of years.
+  if (!Number.isFinite(retryAt) || retryAt <= now || retryAt > now + MAX_BLOCK_MS) return null;
+  if (!realDate(b.retry_at)) return null;
+  return { body: b, retryAt };
 }
 
 /**
@@ -93,8 +114,10 @@ export class LimitBlocks {
   }
 }
 
-/** The local answer for a blocked MCP call: the RP's own §10 body, in §10's `isError` form. */
-export function blockedMcpAnswer(id: unknown, refusal: LimitRefusal): string {
+/** The local answer for a blocked call, as the RP gave it: a 403 with its body, or §10's `isError` result. */
+export function blockedAnswer(id: unknown, refusal: LimitRefusal): { status: number; body: string } {
+  if (refusal.status === 403) return { status: 403, body: JSON.stringify(refusal.body) };
+  if (id === undefined) return { status: 202, body: "" };   // a notification gets no result
   const text = JSON.stringify(refusal.body);
-  return JSON.stringify({ jsonrpc: "2.0", id: id ?? null, result: { isError: true, content: [{ type: "text", text }] } });
+  return { status: 200, body: JSON.stringify({ jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text }] } }) };
 }
