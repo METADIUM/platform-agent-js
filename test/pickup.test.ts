@@ -91,6 +91,16 @@ describe("pickup (spec §8)", () => {
     expect(pickupMessage({ error: "unknown_agent" }, "https://rp")).toContain("add https://rp --verifier");
   });
 
+  it("while a live VC is served, request-level refusals don't tell the user to request again (§8, Briefick B5)", () => {
+    const held = (r: Parameters<typeof pickupMessage>[0]) => pickupMessage(r, "u", true);
+    expect(held({ error: "expired_token" }), "an expired request text told a serving agent to re-request").toContain("보유한 위임으로 계속");
+    expect(held({ error: "expired_token" })).not.toContain("다시 요청하세요");
+    expect(held({ error: "authorization_pending" })).toContain("보유한 위임으로 연결");
+    // Not request-level: the wallet link and a revocation still say what they say without a VC.
+    expect(held({ error: "authorization_pending", lastRequest: { status: "awaiting_link" } })).toContain("지갑 지문");
+    expect(held({ error: "access_denied" })).toBe(pickupMessage({ error: "access_denied" }, "u"));
+  });
+
   it("latest picks the newest; without iat, the one that lasts longest", () => {
     expect(latest([{ delegationId: "a", credential: "a", scope: [], exp: 5 }, { delegationId: "b", credential: "b", scope: [], exp: 9 }])?.delegationId).toBe("b");
     expect(latest([])).toBeNull();
@@ -134,6 +144,30 @@ describe("a /1 target picks up its delegation (spec §8 → §9 → §10)", () =
     expect(c.slept[0], "pickup polled faster than the default 60 s").toBe(60_000);
     expect(s.store.load()!.credentials?.[slot(s.rp)], "the picked-up VC wasn't stored").toBe(vc("1"));
     expect(await call(s.target)).toBe(200);
+  });
+
+  it("an expired request doesn't tell an agent serving a stored VC to re-request (§8, Briefick B5)", async () => {
+    const s = await setup(() => [200, {}]);
+    s.store.save({ ...s.store.load()!, credentials: { [slot(s.rp)]: vc("held") } });
+    const c = clock();
+    const rp = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: s.verifier }, s.store, s.key, {
+      pickup: async () => ({ ok: false, error: "expired_token", lastRequest: { status: "expired" } }), sleep: c.sleep,
+    });
+    closers.push(() => rp.stop());
+    expect(s.target.pendingReason, "the daemon told an agent with a live VC to request again").toContain("보유한 위임으로 계속");
+  });
+
+  it("a stored VC without a live session still gets the plain text: the route outlives a failed exchange (metapass-saas)", async () => {
+    const s = await setup(() => [200, {}]);
+    s.store.save({ ...s.store.load()!, credentials: { [slot(s.rp)]: vc("held") } });
+    const c = clock();
+    // The verifier is unreachable, so the route exists with auth = null.
+    const rp = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: "http://127.0.0.1:9" }, s.store, s.key, {
+      pickup: async () => ({ ok: false, error: "expired_token", lastRequest: { status: "expired" } }), sleep: c.sleep,
+    });
+    closers.push(() => rp.stop());
+    expect(s.target.routes?.size, "the route this test relies on wasn't created").toBe(1);
+    expect(s.target.pendingReason, "a route without a session was read as serving").toBe(pickupMessage({ error: "expired_token", lastRequest: { status: "expired" } }, s.rp));
   });
 
   it("never re-adopts a VC the RP dropped; picks up the next one", async () => {
