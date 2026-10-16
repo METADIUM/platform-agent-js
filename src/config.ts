@@ -20,6 +20,8 @@ export interface DaemonRp {
   verifierUrl?: string;
   /** This RP's alias in the verifier's registry (the `/agent/token` body's `rp`). */
   verifierRp?: string;
+  /** §8 pickup path under `url`, from the verifier's signed registry entry (§17). Absent on older configs: the default. */
+  pickupPath?: string;
 }
 
 export interface DaemonConfig {

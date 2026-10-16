@@ -45,7 +45,7 @@ export async function pickup(o: PickupOptions): Promise<PickupResult> {
     redirect: "error",
     signal: AbortSignal.timeout(o.timeoutMs ?? 10_000),
   });
-  // No §8 endpoint at this RP (Briefick today): not a refusal to retry, a capability it lacks.
+  // No §8 endpoint at this path: not a refusal to retry, a capability the RP lacks (or a wrong stored path).
   if (res.status === 404) return { ok: false, error: "no_pickup" };
   const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
   if (res.ok && json && Array.isArray(json.delegations)) {

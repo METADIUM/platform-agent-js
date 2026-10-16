@@ -1,9 +1,10 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { CompactSign, exportJWK, generateKeyPair } from "jose";
 import http from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { connectV1Target, main, sessionLine } from "../src/cli.js";
+import { connectV1Target, main, pickupOptionsFor, sessionLine } from "../src/cli.js";
 import { startDaemon, type DaemonTarget, type RunningDaemon } from "../src/daemon.js";
 import { loadConfig, saveConfig } from "../src/config.js";
 import { AgentKey } from "../src/key.js";
@@ -94,6 +95,31 @@ async function call(target: DaemonTarget) {
   return r.status;
 }
 
+/** A verifier that serves `GET /rp/<alias>` (spec §17) for `resource`, and its did.json; `pair` answers the RP's pairing. */
+async function fakeVerifier(alias: string, resource: string, pair?: (body: Record<string, unknown>) => Response) {
+  const v1 = await generateKeyPair("ES256");
+  const now = Math.floor(Date.now() / 1000);
+  const jws = await new CompactSign(new TextEncoder().encode(JSON.stringify({
+    iss: "did:web:sso.example.com", iat: now, exp: now + 300, alias, resource, protocol: "agent-delegation/1",
+    pairing: "/agent/pair", pickup: "/agent/delegation/pickup", mcp: "/mcp", requireBodyHash: true,
+  }))).setProtectedHeader({ alg: "ES256", typ: "delegation-rp-entry+jwt", kid: "did:web:sso.example.com#v1" }).sign(v1.privateKey);
+  const didJson = { id: "did:web:sso.example.com", verificationMethod: [{ id: "#v1", publicKeyJwk: await exportJWK(v1.publicKey) }] };
+  const pairs: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", (async (url: string | URL, init?: RequestInit) => {
+    const u = String(url);
+    if (u === `https://sso.example.com/rp/${alias}`) return new Response(jws, { status: 200 });
+    if (u === "https://sso.example.com/.well-known/did.json") return Response.json(didJson);
+    if (pair && u === resource + "/agent/pair") {
+      const body = JSON.parse(Buffer.from(init!.body as Uint8Array).toString("utf8"));
+      pairs.push(body);
+      return pair(body);
+    }
+    return new Response("", { status: 404 });
+  }) as typeof fetch);
+  closers.push(() => vi.unstubAllGlobals());
+  return { pairs };
+}
+
 describe("CLI /1 targets (spec §9–§11.1)", () => {
   it("drop: deletes the stored VC, so a restart doesn't present it again", async () => {
     const s = await setup("constraints_missing");
@@ -158,10 +184,12 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
 
   it("add --verifier saves a /1 RP without pairing, and import stores the VC", async () => {
     const keyFile = tmpKeyFile();
-    const url = "https://minipaas.example.com";
+    const url = "https://minipaas.example.com/api";
+    await fakeVerifier("minipaas", url);
     expect(await main(["add", url, "--verifier", "https://sso.example.com/", "--key-file", keyFile])).toBe(0);
     expect(loadConfig(join(keyFile, "..")).rps).toEqual([
-      { alias: "minipaas", url, verifierUrl: "https://sso.example.com", verifierRp: "minipaas" },
+      { alias: "minipaas", url, verifierUrl: "https://sso.example.com", verifierRp: "minipaas",
+        pickupPath: "/agent/delegation/pickup", mcpPath: "/mcp" },
     ]);
     const file = join(keyFile, "..", "vc.txt");
     writeFileSync(file, vc() + "\n");
@@ -174,10 +202,48 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     const dir = join(keyFile, "..");
     const url = "https://briefick.example.com";
     saveConfig(dir, { rps: [{ alias: "briefick", url }] });
+    await fakeVerifier("briefick", url);
     expect(await main(["add", url, "--verifier", "https://sso.example.com", "--key-file", keyFile])).toBe(1);
     expect(loadConfig(dir).rps, "a refused conversion still changed the config").toEqual([{ alias: "briefick", url }]);
     expect(await main(["add", url, "--verifier", "https://sso.example.com", "--force", "--key-file", keyFile])).toBe(0);
-    expect(loadConfig(dir).rps[0]).toMatchObject({ verifierUrl: "https://sso.example.com" });
+    expect(loadConfig(dir).rps[0]).toMatchObject({ verifierUrl: "https://sso.example.com", pickupPath: "/agent/delegation/pickup" });
+  });
+
+  it("add --verifier --code pairs over /1 with Agent-Proof at the signed pairing path (spec §7, §17)", async () => {
+    const keyFile = tmpKeyFile();
+    const url = "https://briefick.example.com";
+    const key = await AgentKey.generate();
+    openStore({ backend: "file", keyFile }).save({ privateJwk: await key.exportPrivateJwk() } as never);
+    const v = await fakeVerifier("briefick", url, () => Response.json({ paired: true, agent_fingerprint: key.fingerprint }));
+    expect(await main(["add", url, "--verifier", "https://sso.example.com", "--code", "C0DE1234", "--key-file", keyFile])).toBe(0);
+    expect(v.pairs).toHaveLength(1);
+    expect(v.pairs[0]).toMatchObject({ code: "C0DE1234" });
+    expect(loadConfig(join(keyFile, "..")).rps[0]).toMatchObject({ pickupPath: "/agent/delegation/pickup" });
+  });
+
+  it("the daemon picks up at the stored path, and at the default for an older config", async () => {
+    const key = await AgentKey.generate();
+    expect(pickupOptionsFor({ alias: "b", url: "https://b.example.com", pickupPath: "/agent/delegation/pickup" }, key).path)
+      .toBe("/agent/delegation/pickup");
+    expect(pickupOptionsFor({ alias: "m", url: "https://m.example.com" }, key).path).toBeUndefined();
+  });
+
+  it("a refused v0 conversion pairs nothing: the --code survives for the retry with --force (Briefick)", async () => {
+    const keyFile = tmpKeyFile();
+    const dir = join(keyFile, "..");
+    const url = "https://briefick.example.com";
+    saveConfig(dir, { rps: [{ alias: "briefick", url }] });
+    const v = await fakeVerifier("briefick", url, () => Response.json({ paired: true, agent_fingerprint: "x" }));
+    expect(await main(["add", url, "--verifier", "https://sso.example.com", "--code", "C0DE1234", "--key-file", keyFile])).toBe(1);
+    expect(v.pairs, "the code was consumed by a conversion that was then refused").toHaveLength(0);
+    expect(loadConfig(dir).rps).toEqual([{ alias: "briefick", url }]);
+  });
+
+  it("add --verifier refuses an RP the verifier registers at another URL, and saves nothing", async () => {
+    const keyFile = tmpKeyFile();
+    await fakeVerifier("minipaas", "https://minipaas.example.com/api");
+    expect(await main(["add", "https://minipaas.example.com", "--verifier", "https://sso.example.com", "--key-file", keyFile])).toBe(1);
+    expect(loadConfig(join(keyFile, "..")).rps, "a refused entry still changed the config").toEqual([]);
   });
 
   it("a store that can't be written doesn't reject the connect when the exchange drops the VC (Briefick)", async () => {
