@@ -228,6 +228,17 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     expect(pickupOptionsFor({ alias: "m", url: "https://m.example.com" }, key).path).toBeUndefined();
   });
 
+  it("a refused v0 conversion pairs nothing: the --code survives for the retry with --force (Briefick)", async () => {
+    const keyFile = tmpKeyFile();
+    const dir = join(keyFile, "..");
+    const url = "https://briefick.example.com";
+    saveConfig(dir, { rps: [{ alias: "briefick", url }] });
+    const v = await fakeVerifier("briefick", url, () => Response.json({ paired: true, agent_fingerprint: "x" }));
+    expect(await main(["add", url, "--verifier", "https://sso.example.com", "--code", "C0DE1234", "--key-file", keyFile])).toBe(1);
+    expect(v.pairs, "the code was consumed by a conversion that was then refused").toHaveLength(0);
+    expect(loadConfig(dir).rps).toEqual([{ alias: "briefick", url }]);
+  });
+
   it("add --verifier refuses an RP the verifier registers at another URL, and saves nothing", async () => {
     const keyFile = tmpKeyFile();
     await fakeVerifier("minipaas", "https://minipaas.example.com/api");

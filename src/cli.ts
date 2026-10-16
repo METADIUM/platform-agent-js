@@ -1215,6 +1215,12 @@ export async function main(argv: string[]): Promise<number> {
     //    재등록하는 경로가 바로 이것이다(register 명령과 같은 규칙). 종전에는 로컬 플래그만 보고
     //    **code 를 무시한 채 ✅ 를 찍어서**, 사용자는 재등록했다고 믿지만 데몬은 여전히 401 을 돌렸다
     //    (metapass-saas 실측 · briefick#18). 「성공처럼 보이는 실패」의 CLI 판이다.
+    // Converting a v0 RP stops its pairing-based connect loop; never do that by accident (Briefick). Checked before any
+    // network call: pairing first would consume a --code that a refused conversion can't use again (P3).
+    const existing = cfg.rps.find((r) => r.alias === alias);
+    if (args.verifier && existing && !existing.verifierUrl && !args.force) {
+      return fail(`'${alias}' 는 v0 RP 입니다 — /1 로 바꾸려면 --force (되돌리기: remove ${alias} 후 add --code)`);
+    }
     // /1 (spec §17): the verifier's signed registry entry names the RP's legs, and its resource must be the URL typed.
     let entry: Awaited<ReturnType<typeof fetchRpEntry>> & { pairing: string; pickup: string } | null = null;
     if (args.verifier) {
@@ -1239,15 +1245,10 @@ export async function main(argv: string[]): Promise<number> {
       ? { verifierUrl: args.verifier.replace(/\/+$/, ""), verifierRp: args.verifierRp ?? alias, pickupPath: entry.pickup,
           ...(entry.mcp ? { mcpPath: entry.mcp } : {}) }
       : {};
-    const existing = cfg.rps.find((r) => r.alias === alias);
     if (!existing) {
       cfg.rps.push({ alias, url, ...(args.mcpPath ? { mcpPath: args.mcpPath } : {}), ...v1 } satisfies DaemonRp);
       saveConfig(dir, cfg);
     } else if (args.verifier) {
-      // Converting a v0 RP stops its pairing-based connect loop; never do that by accident (Briefick).
-      if (!existing.verifierUrl && !args.force) {
-        return fail(`'${alias}' 는 v0 RP 입니다 — /1 로 바꾸려면 --force (되돌리기: remove ${alias} 후 add --code)`);
-      }
       Object.assign(existing, v1);
       saveConfig(dir, cfg);
     }

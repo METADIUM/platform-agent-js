@@ -14,6 +14,8 @@ export const RP_ENTRY_TYP = "delegation-rp-entry+jwt";
 export const V1_PROTOCOL = "agent-delegation/1";
 /** Clock skew allowed on the entry's `iat`. */
 const SKEW_S = 60;
+/** Longest lifetime accepted (`exp − iat`): the verifier issues 300 s; a longer one widens replay (metapass-saas). */
+const MAX_TTL_S = 600;
 
 export interface RpEntry {
   alias: string;
@@ -69,7 +71,10 @@ export async function fetchRpEntry(o: FetchRpEntryOptions): Promise<RpEntry> {
   if (header.typ !== RP_ENTRY_TYP) throw new RpEntryError(`registry entry typ ${String(header.typ)}`);
   if (header.alg !== "ES256") throw new RpEntryError(`registry entry alg ${String(header.alg)}`);
   const kid = typeof header.kid === "string" ? header.kid : "";
-  if (!kid.startsWith(verifierDid + "#")) throw new RpEntryError(`registry entry kid ${kid} is not the verifier's`);
+  // §17.1 kid rule: the verifier's #v<n> key, not #k (issuer) or #w (wallet provider) (metapass-saas, as Q2).
+  if (!new RegExp(`^${verifierDid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}#v[0-9]+$`).test(kid)) {
+    throw new RpEntryError(`registry entry kid ${kid} is not the verifier's #v key`);
+  }
 
   const docRes = await f(didJsonUrl(verifierDid), opts);
   if (!docRes.ok) throw new RpEntryError(`verifier did.json: HTTP ${docRes.status}`);
@@ -88,6 +93,7 @@ export async function fetchRpEntry(o: FetchRpEntryOptions): Promise<RpEntry> {
   if (p.alias !== o.alias) throw new RpEntryError(`registry entry is for '${String(p.alias)}', not '${o.alias}'`);
   if (typeof p.exp !== "number" || p.exp <= now) throw new RpEntryError("registry entry expired");
   if (typeof p.iat !== "number" || p.iat > now + SKEW_S) throw new RpEntryError("registry entry issued in the future");
+  if (p.exp - p.iat > MAX_TTL_S) throw new RpEntryError(`registry entry lives ${p.exp - p.iat} s, over ${MAX_TTL_S}`);
   if (typeof p.resource !== "string" || trimSlash(p.resource) !== trimSlash(o.rpUrl)) {
     throw new RpEntryError(`the verifier registers '${o.alias}' at ${String(p.resource)}, not ${o.rpUrl}`);
   }

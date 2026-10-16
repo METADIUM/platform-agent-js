@@ -50,6 +50,10 @@ describe("fetchRpEntry (spec §17)", () => {
   it.each([
     ["another typ", { header: { typ: "delegation-revoke+jwt" } }, "typ"],
     ["a kid outside the verifier", { header: { kid: "did:web:evil.example#v1" } }, "kid"],
+    ["the verifier's issuer key #k2", { header: { kid: "did:web:sso.example.com#k2" } }, "#v key"],
+    ["the verifier's wallet-provider key #w2", { header: { kid: "did:web:sso.example.com#w2" } }, "#v key"],
+    ["a #v prefix with a suffix", { header: { kid: "did:web:sso.example.com#v1x" } }, "#v key"],
+    ["an entry that lives over 600 s", { payload: { exp: NOW + 601 } }, "over 600"],
     ["another iss", { payload: { iss: "did:web:evil.example" } }, "iss"],
     ["another alias", { payload: { alias: "briefick" } }, "is for 'briefick'"],
     ["an expired entry", { payload: { exp: NOW } }, "expired"],
