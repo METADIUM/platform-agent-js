@@ -217,15 +217,20 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     await fakeVerifier("briefick", url);
     const inner = globalThis.fetch;
     let daemonUp = true;
+    let daemonStatus = 200;
     vi.stubGlobal("fetch", (async (u: string | URL, init?: RequestInit) =>
       String(u) === "http://127.0.0.1:8787/status"
-        ? (daemonUp ? Response.json({}) : new Response("", { status: 503 }))   // a 200 without `targets` (Briefick)
+        ? (daemonUp ? Response.json({}, { status: daemonStatus }) : Promise.reject(new TypeError("fetch failed")))   // 200 without `targets`, or 401 (Briefick)
         : inner(u, init)) as typeof fetch);
     const out: string[] = [];
     const log = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void out.push(a.join(" ")));
     try {
       expect(await main(["add", url, "--verifier", "https://sso.example.com", "--force", "--key-file", keyFile])).toBe(0);
       expect(out.join("\n"), "a running daemon wasn't told to restart").toContain("재시작해야 반영됩니다");
+      out.length = 0;
+      daemonStatus = 401;   // a daemon after rotate-token: still running (Briefick)
+      expect(await main(["add", url, "--verifier", "https://sso.example.com", "--force", "--key-file", keyFile])).toBe(0);
+      expect(out.join("\n"), "a daemon answering 401 was read as stopped").toContain("재시작해야 반영됩니다");
       out.length = 0;
       daemonUp = false;
       expect(await main(["add", url, "--verifier", "https://sso.example.com", "--force", "--key-file", keyFile])).toBe(0);
