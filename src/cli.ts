@@ -338,14 +338,14 @@ interface DaemonSessionView {
 
 interface V0Session { stopped: boolean; stopReason?: string; failures: number; lastError?: string; lastRefreshAt?: string; expiresAt?: string }
 
-/** Whether a daemon answers `/status` with this token: any 2xx, whatever its body (Briefick). */
+/** Whether a daemon answers `/status` at all: any HTTP status, since a 401 after `rotate-token` is still a daemon (Briefick). */
 async function daemonAnswers(port: number, token: string): Promise<boolean> {
   try {
     const r = await fetch(`http://127.0.0.1:${port}/status`, {
       headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(1500),
     });
     await r.body?.cancel();
-    return r.ok;
+    return true;
   } catch {
     return false;
   }
