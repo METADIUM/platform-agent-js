@@ -832,7 +832,7 @@ export async function connectV1Target(
         say(`회수 경로가 없습니다(404) — ${interval}초 후 한 번 더 확인합니다`);
       } else {
         interval = pollInterval(interval, r.interval);
-        say(pickupMessage(r, rp.url));
+        say(pickupMessage(r, rp.url, routes.size > 0));
       }
     } catch (e) {
       notFound = 0;   // "two in a row" means two answers in a row; an error between them breaks the run
@@ -1260,7 +1260,13 @@ export async function main(argv: string[]): Promise<number> {
     if (cfg.rps.length > 1) {
       console.log(`\n⚠ RP가 ${cfg.rps.length}개 — 루트 /mcp 등록이 있었다면 경로형으로 재등록하세요(status가 전체 명령 출력)`);
     }
-    console.log(`\n데몬 실행: ${invocation()} up`);
+    // A running daemon keeps the config it started with: a converted RP would still poll the old path (Briefick B5).
+    if (await daemonSessions(port, token) !== null) {
+      console.log(`\n⚠ 실행 중인 데몬은 이전 설정으로 돕니다 — 재시작해야 반영됩니다: ` +
+        `서비스로 설치했다면 ${invocation()} up --install, 아니면 실행 중인 up 을 멈추고 다시 실행`);
+    } else {
+      console.log(`\n데몬 실행: ${invocation()} up`);
+    }
     return 0;
   }
 

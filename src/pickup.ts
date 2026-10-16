@@ -84,8 +84,17 @@ export function latest(delegations: PickedDelegation[]): PickedDelegation | null
   return delegations.reduce<PickedDelegation | null>((best, d) => (!best || isNewer(d, best) ? d : best), null);
 }
 
-/** What to tell the user for a refusal (§8: a different text for each). */
-export function pickupMessage(r: PickupRefusal, rpUrl: string): string {
+/**
+ * What to tell the user for a refusal (§8: a different text for each). `holding`: the agent is serving a live VC
+ * for this RP. `authorization_pending` and `expired_token` describe `lastRequest`, never that VC (Briefick B5).
+ */
+export function pickupMessage(r: PickupRefusal, rpUrl: string, holding = false): string {
+  if (holding && r.error === "expired_token") {
+    return "마지막 위임 요청은 만료됐습니다 — 보유한 위임으로 계속 연결됩니다(새 위임이 필요할 때만 새로 요청하세요)";
+  }
+  if (holding && r.error === "authorization_pending" && r.lastRequest?.status !== "awaiting_link") {
+    return "새 위임 요청이 지갑 승인을 기다립니다 — 그동안 보유한 위임으로 연결됩니다";
+  }
   switch (r.error) {
     case "authorization_pending":
       return r.lastRequest?.status === "awaiting_link"

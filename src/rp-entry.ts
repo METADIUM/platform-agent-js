@@ -146,7 +146,9 @@ export async function pairV1(o: PairOptions): Promise<{ fingerprint: string }> {
   });
   const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
   if (!res.ok || json?.paired !== true) {
-    const why = json && typeof json.error === "string" ? `${json.error}${json.error_description ? ": " + String(json.error_description) : ""}` : `HTTP ${res.status}`;
+    // FastAPI answers `{detail}` (mini-paas's code refusals); §7 defines no refusal body.
+    const why = json && typeof json.error === "string" ? `${json.error}${json.error_description ? ": " + String(json.error_description) : ""}`
+      : json && typeof json.detail === "string" ? `HTTP ${res.status}: ${json.detail}` : `HTTP ${res.status}`;
     throw new RpEntryError(`pairing refused (${why})`);
   }
   if (json.agent_fingerprint !== o.key.fingerprint) {

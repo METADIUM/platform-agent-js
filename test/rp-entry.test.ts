@@ -119,6 +119,13 @@ describe("pairV1 (spec §7)", () => {
       .rejects.toThrow(RpEntryError);
   });
 
+  it("surfaces a FastAPI {detail} refusal's text (mini-paas code refusals, §7 defines no body)", async () => {
+    const key = await AgentKey.generate();
+    const r = await rp(() => Response.json({ detail: "만료된 페어링 코드입니다." }, { status: 410 }));
+    await expect(pairV1({ resource: RP, path: "/agent/register", key, code: "C", fetchImpl: r.fetchImpl }))
+      .rejects.toThrow("pairing refused (HTTP 410: 만료된 페어링 코드입니다.)");
+  });
+
   it("surfaces the RP's refusal", async () => {
     const key = await AgentKey.generate();
     const r = await rp(() => Response.json({ error: "paired_elsewhere", error_description: "another account" }, { status: 409 }));
