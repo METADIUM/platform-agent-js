@@ -22,6 +22,7 @@ import { AgentClientError, BriefickAgentClient, isRequestExpired, DEFAULT_SERVIC
 import { AgentAuth } from "./agent.js";
 import { DelegationSessionAuth, type SessionState } from "./delegation-session.js";
 import { exchangeSessionToken } from "./session.js";
+import { fetchRpEntry, pairV1, requireV1, RpEntryError } from "./rp-entry.js";
 import { DEFAULT_POLL_INTERVAL_S, isNewer, latest, pickup, pickupMessage, type PickedDelegation, type PickupResult } from "./pickup.js";
 import { defaultRoute, routeFor, sanitizeRoute, slotKey, slotsOf, vcScope } from "./routes.js";
 import { constraintRefusalAction } from "./constraint-refusal.js";
@@ -1214,16 +1215,29 @@ export async function main(argv: string[]): Promise<number> {
     //    재등록하는 경로가 바로 이것이다(register 명령과 같은 규칙). 종전에는 로컬 플래그만 보고
     //    **code 를 무시한 채 ✅ 를 찍어서**, 사용자는 재등록했다고 믿지만 데몬은 여전히 401 을 돌렸다
     //    (metapass-saas 실측 · briefick#18). 「성공처럼 보이는 실패」의 CLI 판이다.
-    if (args.verifier && !args.code) {
-      // A /1 RP may pair the agent another way; pickup answers `unknown_agent` until it does.
+    // /1 (spec §17): the verifier's signed registry entry names the RP's legs, and its resource must be the URL typed.
+    let entry: Awaited<ReturnType<typeof fetchRpEntry>> & { pairing: string; pickup: string } | null = null;
+    if (args.verifier) {
+      try {
+        entry = requireV1(await fetchRpEntry({ verifierUrl: args.verifier, alias: args.verifierRp ?? alias, rpUrl: url }));
+        if (args.code) {
+          await pairV1({ resource: entry.resource, path: entry.pairing, key, code: args.code, label: registerLabel(args),
+            version: packageVersion() ?? undefined });
+          console.log(`✅ /1 페어링 완료 — 지문 ${key.fingerprint} (RP 화면의 지문과 대조)`);
+        }
+      } catch (e) {
+        if (e instanceof RpEntryError) return fail(e.message);
+        throw e;
+      }
     } else if (!data.registrations?.[url] || args.code) {
       if (!args.code) return fail("--code 필요(최초 페어링) — RP의 에이전트 등록 화면에서 발급");
       const client = agentClient(url, key);
       await client.register(args.code, registerLabel(args));
       updateStore(store, data, (s) => { s.registrations = { ...(s.registrations ?? {}), [url]: true }; });
     }
-    const v1 = args.verifier
-      ? { verifierUrl: args.verifier.replace(/\/+$/, ""), verifierRp: args.verifierRp ?? alias }
+    const v1 = args.verifier && entry
+      ? { verifierUrl: args.verifier.replace(/\/+$/, ""), verifierRp: args.verifierRp ?? alias, pickupPath: entry.pickup,
+          ...(entry.mcp ? { mcpPath: entry.mcp } : {}) }
       : {};
     const existing = cfg.rps.find((r) => r.alias === alias);
     if (!existing) {
@@ -1422,7 +1436,7 @@ export async function main(argv: string[]): Promise<number> {
       targets.push(target);
       if (rp.verifierUrl) {
         const pickupDeps: V1Deps = {
-          pickup: () => pickup({ url: rp.url, key, version: packageVersion() ?? undefined }),
+          pickup: () => pickup(pickupOptionsFor(rp, key)),
         };
         connectV1Target(target, data, { ...rp, verifierUrl: rp.verifierUrl }, store, key, pickupDeps).catch((e: unknown) => {
           target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
@@ -1552,6 +1566,11 @@ export async function main(argv: string[]): Promise<number> {
  *     종전대로 `package.json` 을 읽는다. 두 경로가 서로를 안 건드린다
  */
 declare const __AGENT_VERSION__: string | undefined;
+
+/** The §8 pickup call for a configured /1 RP: the signed entry's path when stored, else the default (older configs). */
+export function pickupOptionsFor(rp: DaemonRp, key: AgentKey): Parameters<typeof pickup>[0] {
+  return { url: rp.url, ...(rp.pickupPath ? { path: rp.pickupPath } : {}), key, version: packageVersion() ?? undefined };
+}
 
 function packageVersion(): string | null {
   // 빌드 때 박은 값이 있으면 그것이 답이다 — 파일이 없는 실행본도 판을 말할 수 있어야 한다.
