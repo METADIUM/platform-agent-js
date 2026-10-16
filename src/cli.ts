@@ -338,6 +338,19 @@ interface DaemonSessionView {
 
 interface V0Session { stopped: boolean; stopReason?: string; failures: number; lastError?: string; lastRefreshAt?: string; expiresAt?: string }
 
+/** Whether a daemon answers `/status` with this token: any 2xx, whatever its body (Briefick). */
+async function daemonAnswers(port: number, token: string): Promise<boolean> {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/status`, {
+      headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(1500),
+    });
+    await r.body?.cancel();
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** The running daemon's per-RP session state, or null when it can't be read (stopped, older daemon, wrong token). */
 async function daemonSessions(port: number, token: string): Promise<DaemonSessionView[] | null> {
   try {
@@ -832,7 +845,8 @@ export async function connectV1Target(
         say(`회수 경로가 없습니다(404) — ${interval}초 후 한 번 더 확인합니다`);
       } else {
         interval = pollInterval(interval, r.interval);
-        say(pickupMessage(r, rp.url, routes.size > 0));
+        // Serving = a session with a token; a route and its auth outlive expiry, refusal, keep and a failed exchange.
+        say(pickupMessage(r, rp.url, [...sessions.values()].some((a) => ["active", "ending"].includes(a.state().status))));
       }
     } catch (e) {
       notFound = 0;   // "two in a row" means two answers in a row; an error between them breaks the run
@@ -1261,7 +1275,7 @@ export async function main(argv: string[]): Promise<number> {
       console.log(`\n⚠ RP가 ${cfg.rps.length}개 — 루트 /mcp 등록이 있었다면 경로형으로 재등록하세요(status가 전체 명령 출력)`);
     }
     // A running daemon keeps the config it started with: a converted RP would still poll the old path (Briefick B5).
-    if (await daemonSessions(port, token) !== null) {
+    if (await daemonAnswers(port, token)) {
       console.log(`\n⚠ 실행 중인 데몬은 이전 설정으로 돕니다 — 재시작해야 반영됩니다: ` +
         `서비스로 설치했다면 ${invocation()} up --install, 아니면 실행 중인 up 을 멈추고 다시 실행`);
     } else {

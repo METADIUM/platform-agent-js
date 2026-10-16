@@ -157,6 +157,19 @@ describe("a /1 target picks up its delegation (spec §8 → §9 → §10)", () =
     expect(s.target.pendingReason, "the daemon told an agent with a live VC to request again").toContain("보유한 위임으로 계속");
   });
 
+  it("a stored VC without a live session still gets the plain text: the route outlives a failed exchange (metapass-saas)", async () => {
+    const s = await setup(() => [200, {}]);
+    s.store.save({ ...s.store.load()!, credentials: { [slot(s.rp)]: vc("held") } });
+    const c = clock();
+    // The verifier is unreachable, so the route exists with auth = null.
+    const rp = await connectV1Target(s.target, s.store.load()!, { alias: "m", url: s.rp, verifierUrl: "http://127.0.0.1:9" }, s.store, s.key, {
+      pickup: async () => ({ ok: false, error: "expired_token", lastRequest: { status: "expired" } }), sleep: c.sleep,
+    });
+    closers.push(() => rp.stop());
+    expect(s.target.routes?.size, "the route this test relies on wasn't created").toBe(1);
+    expect(s.target.pendingReason, "a route without a session was read as serving").toBe(pickupMessage({ error: "expired_token", lastRequest: { status: "expired" } }, s.rp));
+  });
+
   it("never re-adopts a VC the RP dropped; picks up the next one", async () => {
     const s = await setup((n) => (n === 1 ? [403, { error: "constraint_denied", reason: "constraints_missing" }] : [200, {}]));
     const old = vc("old");

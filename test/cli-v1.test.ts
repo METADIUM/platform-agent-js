@@ -219,7 +219,7 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     let daemonUp = true;
     vi.stubGlobal("fetch", (async (u: string | URL, init?: RequestInit) =>
       String(u) === "http://127.0.0.1:8787/status"
-        ? (daemonUp ? Response.json({ targets: [] }) : new Response("", { status: 503 }))
+        ? (daemonUp ? Response.json({}) : new Response("", { status: 503 }))   // a 200 without `targets` (Briefick)
         : inner(u, init)) as typeof fetch);
     const out: string[] = [];
     const log = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void out.push(a.join(" ")));
