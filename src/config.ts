@@ -24,6 +24,9 @@ export interface DaemonRp {
   pickupPath?: string;
 }
 
+/** Paths an RP serves when its config names none. Mutable so a test can show the assembly reads it. */
+export const DEFAULT_RP_PATHS: { mcpPath: string } = { mcpPath: "/api/mcp" };
+
 export interface DaemonConfig {
   /** 최초 up이 배정한 리슨 포트(이후 고정). */
   port?: number;

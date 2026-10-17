@@ -1,35 +1,28 @@
 /**
- * platform-agent CLI — 레포 clone 없이 `npx`로 에이전트 등록/세션.
+ * platform-agent CLI (agent-delegation `/1`): pair with an RP, pick up delegations (§8), and serve them to MCP
+ * clients through the local daemon. v0 (`register`/`session`/`proxy`) was removed on 2026-10-17 (spec §20).
  *
- *   npx @metadium-did/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
- *   npx @metadium-did/platform-agent-js did          # 이 에이전트 did:jwk 출력
- *   npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>   # 위임 세션 bearer 1회 발급
- *
- * 키는 `~/.metapass-agent/key.json`에 영속 → **최초 1회만 등록, 이후 재사용**. `--url`/`--code`는
- * 환경변수 `BRIEFICK_URL`/`PAIRING_CODE`로도 대체 가능.
+ *   npx @metadium-did/platform-agent-js add <RP_URL> --verifier <VERIFIER_URL> --code <PAIRING_CODE>
+ *   npx @metadium-did/platform-agent-js up --install
+ *   npx @metadium-did/platform-agent-js status
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MINISIGN_PUBLIC_KEYS } from "./release-key.js";
-import { isReplacement, nextCheckDelayMs } from "./delegation-refresh.js";
 import { downloadVerified, freeBytes, latestTag, planUpgrade, type UpgradeIo } from "./upgrade.js";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { hostname } from "node:os";
 import { AgentKey } from "./key.js";
-import { AgentClientError, BriefickAgentClient, isRequestExpired, DEFAULT_SERVICE } from "./briefick.js";
-import { AgentAuth } from "./agent.js";
 import { DelegationSessionAuth, type SessionState } from "./delegation-session.js";
 import { exchangeSessionToken } from "./session.js";
-import { fetchRpEntry, pairV1, requireV1, RpEntryError } from "./rp-entry.js";
+import { fetchRpEntry, pairV1, requireV1, RpEntryError, type RpEntry } from "./rp-entry.js";
 import { DEFAULT_POLL_INTERVAL_S, isNewer, latest, pickup, pickupMessage, type PickedDelegation, type PickupResult } from "./pickup.js";
 import { defaultRoute, routeFor, sanitizeRoute, slotKey, slotsOf, vcScope } from "./routes.js";
-import { constraintRefusalAction } from "./constraint-refusal.js";
-import { startProxy, type BearerSource } from "./proxy.js";
 import { defaultKeyFile, KeyStoreUnreadable, loadStore, openStore, type AgentStore, type DroppedVc, type HeldCredential, type KeyStore } from "./keystore.js";
 import {
-  aliasFromUrl, configDir, ensureToken, loadConfig, mcpAddCommand, mcpAddRouteCommand, rotateToken, saveConfig,
+  aliasFromUrl, configDir, DEFAULT_RP_PATHS, ensureToken, loadConfig, mcpAddCommand, mcpAddRouteCommand, rotateToken, saveConfig,
   type DaemonConfig, type DaemonRp,
 } from "./config.js";
 import { startDaemon, type DaemonTarget } from "./daemon.js";
@@ -47,6 +40,7 @@ interface Args {
   code?: string;
   keyFile: string;
   keyBackend?: string;
+  /** Accepted and ignored: it converted a v0 RP, and v0 is gone. Kept so older commands still run. */
   force: boolean;
   port?: number;
   mcpPath?: string;
@@ -60,7 +54,6 @@ interface Args {
   arg3?: string;
   /** §15: the daemon route a delegation goes to (`credentials import`/`unhold`, `route rename`). */
   route?: string;
-  insecureNoToken: boolean;
   install: boolean;
   uninstallFlag: boolean;
   /**
@@ -81,7 +74,7 @@ interface Args {
 }
 
 function parse(argv: string[]): Args {
-  const out: Args = { keyFile: "", force: false, insecureNoToken: false, install: false, uninstallFlag: false };
+  const out: Args = { keyFile: "", force: false, install: false, uninstallFlag: false };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const raw = argv[i];
@@ -114,7 +107,6 @@ function parse(argv: string[]): Args {
     else if (a === "--verifier-rp") out.verifierRp = val();
     else if (a === "--route") out.route = val();
     else if (a === "--label") out.label = val();
-    else if (a === "--insecure-no-token") out.insecureNoToken = true;
     else if (a === "--install") out.install = true;
     else if (a === "--check") out.check = true;
     else if (a === "--uninstall") out.uninstallFlag = true;
@@ -166,85 +158,9 @@ async function keyFrom(store: AgentStore): Promise<{ key: AgentKey; data: KeySto
     return { key: await AgentKey.fromPrivateJwk(existing.privateJwk), data: existing, created: false };
   }
   const key = await AgentKey.generate();
-  const data: KeyStore = { privateJwk: key.exportPrivateJwk(), registrations: {} };
+  const data: KeyStore = { privateJwk: key.exportPrivateJwk() };
   store.save(data);
   return { key, data, created: true };
-}
-
-/**
- * 401 안내 — RP가 사유(미등록/회수됨)를 내려주면 함께 표기.
- *
- * ⚠️ **이 문자열은 사용자가 그대로 복사해 실행한다**(§7-2-A ⑤ · briefick#18 실측). 그래서:
- *   ① 아는 값(`url`)은 채운다 — `<URL>` 꺾쇠를 그대로 두면 셸이 **입력 리다이렉션**으로 읽어
- *      «URL 이라는 파일이 없다»가 뜬다.
- *   ② 사람이 바꿀 자리(코드)만 남기되 **꺾쇠 없는 placeholder** 로 — 그대로 붙여넣어도 셸이
- *      안 깨지고 서버가 «잘못된 코드»로 명확히 거절한다.
- *   ③ 경로(`/publish` 등)는 **기능 설명**으로 — 하드코딩하면 RP 가 UI 를 옮길 때 낡는다
- *      (실제로 briefick 이 `/publish`→`/agents` 로 옮겨 이 문구가 404 를 가리켰다).
- * 📌 `--force` 는 남긴다 — code 가 있으면 잉여지만 «덮어쓴다»가 명시적이고 해롭지 않다.
- */
-function registerGuide(e: AgentClientError, url: string): string {
-  const base =
-    "서버에서 등록이 회수됐거나 등록되지 않은 에이전트입니다 — " +
-    "Briefick 에이전트 등록 페이지에서 새 페어링 코드를 발급받아 다음을 실행하세요(코드는 발급받은 값으로 바꾸세요):\n" +
-    `  register --url ${url} --code 발급받은코드 --force`;
-  const detail = e.body && typeof e.body === "object" ? (e.body as { error?: unknown }).error : undefined;
-  return typeof detail === "string" && detail ? `${base}\n  (서버 사유: ${detail})` : base;
-}
-
-/** 지갑 승인·전달을 기다려 위임 VC를 회수하고 캐시에 저장한다(캐시 무시 — 항상 새로 회수). */
-async function waitCredential(
-  client: BriefickAgentClient,
-  data: KeyStore,
-  url: string,
-  store: AgentStore,
-  key: AgentKey,
-): Promise<string> {
-  console.error("위임 VC 회수 대기(지갑에서 승인 필요)…");
-  // RP retrieve의 세분화 신호(no_request / pending+lastRequest)로 안내를 분기 — 무음 pending 조기 감지.
-  const cred = await client.waitForDelegation({
-    timeoutMs: 180_000,
-    onStatus: (r) => {
-      if (r.status === "no_request") {
-        console.error(
-          `  아직 이 에이전트(지문 ${key.fingerprint}) 대상 위임 요청이 없습니다 — ` +
-            "Briefick 에이전트 페이지에서 지문을 대조해 위임을 발급하세요",
-        );
-      } else if (isRequestExpired(r)) {
-        // 만료된 요청을 "승인 대기"로 오표시하지 않는다 — RP status:"expired" 또는 expiresAt로 판정.
-        console.error(
-          `  위임 요청이 만료됐습니다(nonce ${r.lastRequest?.nonce ?? "?"}) — Briefick 에이전트 페이지에서 위임을 다시 발급하세요`,
-        );
-      } else if (r.status === "pending" && r.lastRequest) {
-        console.error(
-          `  위임 요청 확인(nonce ${r.lastRequest.nonce ?? "?"}, 만료 ${r.lastRequest.expiresAt ?? "?"}) — 지갑 승인·전달 대기…`,
-        );
-      }
-    },
-  }).catch((e) => {
-    // 미등록/등록 회수 — 원인 모를 에러 대신 복구 절차 안내.
-    if (e instanceof AgentClientError && (e.httpStatus === 401 || e.message.includes("등록되지 않은"))) {
-      throw new AgentClientError(registerGuide(e, url), e.httpStatus, e.body);
-    }
-    throw e;
-  });
-  updateStore(store, data, (s) => {
-    s.credentials = { ...(s.credentials ?? {}), [url]: cred };
-  });
-  return cred;
-}
-
-/** 위임 VC 확보 — 저장돼 있으면 재사용, 없으면 회수(지갑 승인 대기) 후 저장. */
-async function ensureCredential(
-  client: BriefickAgentClient,
-  data: KeyStore,
-  url: string,
-  store: AgentStore,
-  key: AgentKey,
-): Promise<string> {
-  const stored = data.credentials?.[url];
-  if (stored) return stored;
-  return waitCredential(client, data, url, store, key);
 }
 
 /**
@@ -256,7 +172,6 @@ export function updateStore(store: AgentStore, data: KeyStore, change: (fresh: K
   change(fresh);
   store.save(fresh);
   data.credentials = fresh.credentials;
-  data.registrations = fresh.registrations;
   data.held = fresh.held;
   data.dropped = fresh.dropped;
   data.routeNames = fresh.routeNames;
@@ -275,68 +190,13 @@ export function clearCredential(store: AgentStore, data: KeyStore, url: string, 
   return had;
 }
 
-/** The RP refused the delegation for a limit it does not understand (spec §11.1 `keep`): the VC stays, unused. */
-export class DelegationHeldError extends Error {
-  constructor(url: string, readonly reasons: string[], readonly keys: string[] = []) {
-    super(
-      `RP 가 이 위임의 제약을 이해하지 못합니다(${reasons.join(",")}${keys.length ? ": " + keys.join(",") : ""}) — ` +
-        "위임은 보관하고 재시도하지 않습니다. " +
-        `RP 가 갱신되면 다시 시작하거나, 지갑에서 새 위임을 승인하세요(${url})`,
-    );
-    this.name = "DelegationHeldError";
-  }
-}
-
-/**
- * 서버-로컬 상태 불일치 복구 분기 — 세션/proxy 시작 실패를 사유별로 처리한다.
- * - 401(등록 회수) → 재등록 안내로 즉시 실패
- * - 세션 거부(위임 철회 등 사유 수신) → 캐시 폐기 후 재발급 승인 대기로 전환(1회 재시도용 새 VC 반환)
- *   단, 사유가 §11.1 `keep`(`constraints_unknown_key`)이면 VC 를 지우지 않고 {@link DelegationHeldError}
- * - 세션 완료 타임아웃 → 철회 가능성 안내(캐시 수동 정리 방법 포함) 후 원래 예외 전파
- */
-export async function recoverSessionFailure(
-  e: unknown,
-  client: BriefickAgentClient,
-  data: KeyStore,
-  url: string,
-  store: AgentStore,
-  key: AgentKey,
-  /** The VC that was presented, when the caller knows it; else the one in memory now. */
-  presented?: string,
-): Promise<string | null> {
-  if (!(e instanceof AgentClientError)) return null;
-  const refused = presented ?? data.credentials?.[url];
-  if (e.httpStatus === 401) {
-    throw new AgentClientError(registerGuide(e, url), e.httpStatus, e.body);
-  }
-  if (e.message.includes("세션 거부")) {
-    const body = e.body as { reasons?: unknown; keys?: unknown } | undefined;
-    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-    const list = strings(body?.reasons);
-    if (constraintRefusalAction(list) === "keep") throw new DelegationHeldError(url, list, strings(body?.keys));
-    console.error(`위임이 무효화됐습니다(${e.message}) — 캐시를 비우고 지갑 재발급 승인 대기로 전환합니다`);
-    // Nothing in memory was refused, so there is nothing to clear; a VC on disk now is a newer one (Briefick).
-    if (refused !== undefined) clearCredential(store, data, url, refused);
-    return waitCredential(client, data, url, store, key);
-  }
-  if (e.message.includes("세션 완료 타임아웃")) {
-    console.error(
-      "세션이 pending인 채 타임아웃됐습니다 — 위임이 철회됐거나 검증자가 결과를 전이하지 못했을 수 있습니다.\n" +
-        `  캐시를 비우고 재시도: credentials clear --url ${url}`,
-    );
-  }
-  return null;
-}
-
 interface DaemonSessionView {
   alias: string;
   connected: boolean;
   pendingReason?: string;
-  session?: V0Session | SessionState;
+  session?: SessionState;
   routes?: Array<DaemonSessionView & { route: string }>;
 }
-
-interface V0Session { stopped: boolean; stopReason?: string; failures: number; lastError?: string; lastRefreshAt?: string; expiresAt?: string }
 
 /** Whether a daemon answers `/status` at all: any HTTP status, since a 401 after `rotate-token` is still a daemon (Briefick). */
 async function daemonAnswers(port: number, token: string): Promise<boolean> {
@@ -368,17 +228,9 @@ async function daemonSessions(port: number, token: string): Promise<DaemonSessio
 export function sessionLine(t: DaemonSessionView | undefined): string | null {
   if (!t) return null;
   if (!t.connected) return `⏸ 세션 미연결: ${t.pendingReason ?? "위임 대기"}`;
-  if (!t.session) return null;
-  if ("status" in t.session) return v1SessionLine(t.session);
-  const s = t.session;
-  if (s.stopped) {
-    const fix = s.stopReason === "registration_gone" ? "재등록 필요(register --code)"
-      : s.stopReason === "delegation_refused" ? "지갑에서 새 위임 승인 필요"
-      : "원인 확인 후 데몬 재시작";
-    return `✗ 세션 갱신 중지 — ${fix}${s.lastError ? `: ${s.lastError}` : ""}`;
-  }
-  if (s.failures > 0) return `⚠ 세션 갱신 실패 ${s.failures}회, 재시도 중${s.lastError ? `: ${s.lastError}` : ""}`;
-  return null;
+  // A daemon still running a pre-removal build may report a v0 session (no `status`): nothing to add for it.
+  if (!t.session || !("status" in t.session)) return null;
+  return v1SessionLine(t.session);
 }
 
 function v1SessionLine(s: SessionState): string | null {
@@ -431,161 +283,6 @@ function formatLeft(ms: number): string {
   if (h >= 48) return `${Math.floor(h / 24)}d`;
   if (h >= 1) return `${h}h`;
   return `${Math.max(1, Math.floor(ms / 60_000))}m`;
-}
-
-/**
- * 데몬 타깃 연결(백그라운드) — 저장된 위임이 있으면 즉시 bearer 갱신 루프를 시작하고,
- * 없거나 무효화됐으면 지갑 승인(회수)을 기다렸다가 자동 연결한다. 실패해도 데몬은 계속
- * 뜬 채 해당 경로만 503(delegation_pending) — 다른 RP에 영향 없음.
- */
-/**
- * Asks the RP, on a long interval, whether a **newer** delegation is waiting — and switches to it.
- *
- * 🔴 Without this the daemon retrieved a delegation only when it had none
- * ({@link connectTarget}: `if (!credential)`). A delegation the user approved *afterwards* was
- * never collected: it sat in `delivered` until the RP's 12-hour window dropped it, while the agent
- * kept working on the older grant. **The limit the user chose was silently not applied**, and the
- * only escape was `credentials clear`, which nobody has a reason to know about.
- * Measured in production (`[Briefick]`, 2026-10-01, 0.5.7/pmvm-02): two 30-day delegations
- * approved at 03:06 and 03:14 both reached `delivered`, and `retrieve` was called **0 times**
- * while `session/start` and `complete` kept returning 200 on the cached grant.
- *
- * ⚠️ **This runs for every configured RP, not only the one that reported the bug.** The interval
- * is picked to fit briefick's 10-minute badge because that is the tightest constraint known — not
- * because it is a briefick setting. And {@link isReplacement} keys on the credential rather than a
- * status word, because mini-paas spells the same success `retrieved` where briefick spells it
- * `delivered`; requiring one word made this silently never collect on the other RP.
- *
- * ⬜ How far this reaches mini-paas, corrected twice — the halves fail for different reasons:
- *
- * ```
- * session half    NOT mini-paas's job, **by design**. Their mcp/README: the agent exchanges a
- *                 session with the VERIFIER (sso.cplabs.io) and their MCP server only consumes
- *                 the resulting token. So `session/start` being absent is architecture, not an
- *                 unimplemented feature (`[minipaas]`, review of #29).
- * retrieve half   present, but a different SHAPE: `GET ?nonce=&secret=` against this CLI's
- *                 `POST {didJwk, pop}`. Status words were only one of two mismatches.
- * ```
- *
- * ⚠️ So this loop does not drive mini-paas today — but **not for the reason first written here**.
- * The first version said "no session endpoints, therefore unreachable", which was a sound grep
- * with an unsound inference on top: what would have existed instead, had the design differed, was
- * the `mcp/` package nobody had looked at. ⇒ A zero can be correct and still carry a wrong
- * conclusion, and the check is *"what would be there instead?"*
- *
- * 🟢 The credential-keyed {@link isReplacement} still matters here: it removes the mismatch that
- * would have been **silent**. The remaining one (method and auth params) fails loudly, counts as a
- * failure, and backs off to the ceiling — the safe direction.
- *
- * ⚠️ Only runs while connected. If `auth` is null, {@link connectTarget} is already sitting in
- * `waitCredential` polling the same endpoint — two callers would race for one `delivered`
- * credential, and whichever lost would see it consumed with nothing to show for it.
- */
-export async function watchForNewerDelegation(
-  target: DaemonTarget,
-  client: BriefickAgentClient,
-  data: KeyStore,
-  rp: DaemonRp,
-  store: AgentStore,
-  key: AgentKey,
-): Promise<void> {
-  let failures = 0;
-  for (;;) {
-    await new Promise((r) => setTimeout(r, nextCheckDelayMs(failures)));
-    if (!target.auth) continue;
-    try {
-      const r = await client.retrieveDelegation();
-      // 🔴 `no_agent` answers 200, but it is not a healthy answer: the registration was revoked and
-      //    asking again changes nothing. Treated as healthy it polls every 5 minutes forever and
-      //    logs on the RP every time — the weak form of the 401 storm this loop was given a ceiling
-      //    to avoid (`[Briefick]`, review of #29).
-      if (r.status === "no_agent") {
-        failures++;
-        console.error(
-          `[${rp.alias}] 등록이 회수된 에이전트입니다 — 재등록 필요(register --code). ` +
-            `확인 간격을 ${Math.round(nextCheckDelayMs(failures) / 60000)}분으로 늘립니다`,
-        );
-        continue;
-      }
-      // An answered question is a healthy check — «pending» is an answer, not a failure. Counting
-      // it as one would back off exactly while the user is approving.
-      failures = 0;
-      if (!isReplacement(r)) continue;
-      // 🔴 Persist BEFORE touching the session. The RP has already moved this delegation to
-      //    `retrieved` and deleted its copy, so from here this process holds the only one —
-      //    dying between here and the save loses the user's approval, silently.
-      updateStore(store, data, (s) => {
-        s.credentials = { ...(s.credentials ?? {}), [rp.url]: r.credential! };
-      });
-      console.error(`[${rp.alias}] 새 위임 수령 — 세션을 다시 엽니다`);
-      // `DaemonTarget.auth` is a `BearerSource`, which only promises `bearer()`. Narrow rather than
-      // cast: a future source that is not an AgentAuth must not be stopped by a wrong assumption.
-      const previous = target.auth;
-      target.auth = null;
-      if (previous instanceof AgentAuth) previous.stop();
-      target.pendingReason = "새 위임으로 재연결 중";
-      await connectTarget(target, client, data, rp, store, key);
-    } catch (e) {
-      failures++;
-      console.error(
-        `[${rp.alias}] 새 위임 확인 실패(${failures}회, ${Math.round(nextCheckDelayMs(failures) / 60000)}분 후 재시도): ` +
-          (e instanceof Error ? e.message : String(e)),
-      );
-    }
-  }
-}
-
-export async function connectTarget(
-  target: DaemonTarget,
-  client: BriefickAgentClient,
-  data: KeyStore,
-  rp: DaemonRp,
-  store: AgentStore,
-  key: AgentKey,
-): Promise<void> {
-  for (;;) {
-    try {
-      let credential = data.credentials?.[rp.url];
-      if (!credential || target.heldCredential === credential) {
-        console.error(`[${rp.alias}] 위임 미보유 — 지갑 승인 대기(지문 ${key.fingerprint})`);
-        credential = await waitCredential(client, data, rp.url, store, key);
-      }
-      const auth = new AgentAuth({
-        client,
-        credential,
-        onRefresh: (_b, exp) => console.error(`[${rp.alias}] 세션 bearer 갱신 (만료 ${exp.toISOString()})`),
-        onError: (e) => console.error(`[${rp.alias}] 세션 갱신 실패(재시도됨): ${e}`),
-        // 🔴 영구 실패(등록 회수 등) — 재시도해도 같은 답이라 루프가 멈춘다. 조용히 멈추지 않게 크게 남긴다.
-        onFatal: (e) => console.error(`[${rp.alias}] 세션 갱신 **영구 실패** — 재시도 중단. 재등록 필요(register --code): ${e}`),
-      });
-      try {
-        await auth.start();
-      } catch (e) {
-        const fresh = await recoverSessionFailure(e, client, data, rp.url, store, key, credential).catch((r: unknown) => {
-          if (r instanceof DelegationHeldError) target.heldCredential = credential;
-          throw r;
-        });
-        if (!fresh) throw e;
-        auth.stop();
-        continue; // 재발급 위임으로 처음부터
-      }
-      target.auth = auth;
-      const until = delegationValidUntil(credential);
-      console.error(
-        `[${rp.alias}] 연결됨 → ${target.targetMcpUrl}` +
-          (until ? ` (위임 만료 ${until.toISOString()})` : ""),
-      );
-      return;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // While the held VC is still the stored one, a later failure (a retrieve timeout) must not replace the reason.
-      const stillHeld = target.heldCredential !== undefined && target.heldCredential === data.credentials?.[rp.url];
-      if (e instanceof DelegationHeldError) target.pendingReason = msg;
-      else if (!stillHeld) target.pendingReason = `연결 실패 — 60초 후 재시도: ${msg}`;
-      console.error(`[${rp.alias}] ${stillHeld && !(e instanceof DelegationHeldError) ? `새 위임 대기 — 60초 후 재확인: ${msg}` : target.pendingReason}`);
-      await new Promise((r) => setTimeout(r, 60_000));
-    }
-  }
 }
 
 
@@ -885,17 +582,70 @@ export function invocation(sea: boolean = isSeaBinary(), execPath: string = proc
   return sea ? execPath : "npx @metadium-did/platform-agent-js";
 }
 
+/** When v0 was removed from every RP (spec §20) and from this CLI. */
+export const V0_REMOVED_ON = "2026-10-17";
+
+const REMOVED_V0_COMMANDS = ["register", "session", "proxy"];
+
+/**
+ * The `/1` `add` for a URL; `--alias` only when the entry's alias isn't the URL's default. A key already paired
+ * there needs no code (Briefick), so `--code` is required only for a new pairing.
+ */
+function readdCommand(url: string, alias: string | undefined, inv: string, newPairing = false): string {
+  const named = alias !== undefined && alias !== aliasFromUrl(url) ? ` --alias ${alias}` : "";
+  const line = `${inv} add ${url} --verifier <verifier-url> --verifier-rp <alias at the verifier>${named}`;
+  return newPairing
+    ? `${line} --code <code> (the exact line, with its code, is on the RP's agents page)`
+    : `${line} (the exact line is on the RP's agents page; add --code <code> only if the RP asks for one)`;
+}
+
+/** What `up` and `status` say for a config entry without a verifier: a v0 target, which is never contacted. */
+export function v0TargetMessage(rp: DaemonRp, inv: string = invocation()): string {
+  return `'${rp.alias}' is a v0 target; v0 was removed (${V0_REMOVED_ON}). Re-add it with: ${readdCommand(rp.url, rp.alias, inv)}`;
+}
+
+/** `add` without `--verifier`: that was v0 pairing. */
+export function addNeedsVerifier(url: string, inv: string = invocation()): string {
+  return `--verifier is required: v0 pairing was removed (${V0_REMOVED_ON}). Use: ${readdCommand(url, undefined, inv, true)}`;
+}
+
+/**
+ * One configured RP as a daemon target. A `/1` RP connects in the background (pickup, exchange); a v0 entry gets
+ * {@link v0TargetMessage} as its 503 reason and no network call.
+ */
+export function daemonTargetFor(
+  rp: DaemonRp, data: KeyStore, store: AgentStore, key: AgentKey,
+  deps: V1Deps = { pickup: () => pickup(pickupOptionsFor(rp, key)) },
+): DaemonTarget {
+  const target: DaemonTarget = {
+    alias: rp.alias,
+    targetMcpUrl: mcpUrlFor(rp.url, rp.mcpPath),
+    auth: null,
+    pendingReason: "위임 미확보 — 지갑에서 승인하면 자동 연결됩니다",
+  };
+  if (!rp.verifierUrl) {
+    target.pendingReason = v0TargetMessage(rp);
+    console.error(`[${rp.alias}] ${target.pendingReason}`);
+    return target;
+  }
+  connectV1Target(target, data, { ...rp, verifierUrl: rp.verifierUrl }, store, key, deps).catch((e: unknown) => {
+    target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
+    console.error(`[${rp.alias}] ${target.pendingReason}`);
+  });
+  return target;
+}
+
 export const helpText = (inv: string = invocation()): string => `metapass-agent — AI 에이전트 위임 CLI
 
 시작하기
-  ${inv} add <RP_URL> --code <페어링 코드>
+  ${inv} add <RP_URL> --verifier <검증자 URL> --code <페어링 코드>
   ${inv} up --install
   ${inv} status
 
 데몬
-  add <RP_URL> --code <코드>        RP를 페어링하고 데몬에 추가합니다. Claude Code 등록 명령을 출력합니다.
-                                    [--alias 이름] [--label 표시 이름]
-  add <RP_URL> --verifier <URL>     /1 RP를 추가합니다. --code를 주면 페어링도 합니다. [--verifier-rp 등록부 별칭]
+  add <RP_URL> --verifier <URL>     RP를 데몬에 추가합니다. --code를 주면 페어링도 합니다. Claude Code 등록 명령을 출력합니다.
+                                    [--verifier-rp 등록부 별칭] [--alias 이름] [--label 표시 이름]
+                                    --verifier는 필수입니다(v0 페어링은 2026-10-17에 제거됐습니다).
                                     위임은 데몬이 RP에서 자동으로 받습니다(§8 회수). 위임마다 경로가 생깁니다:
                                     127.0.0.1:<포트>/<alias>/<경로>/mcp (경로 = 첫 scope, §15).
   up [--install]                    등록된 모든 RP를 127.0.0.1:<포트>/<alias>/mcp로 제공합니다.
@@ -908,16 +658,12 @@ export const helpText = (inv: string = invocation()): string => `metapass-agent 
 
 위임 VC
   credentials clear [--url <RP>]        저장된 위임 VC를 지웁니다. 다음 실행 때 지갑 승인을 기다립니다.
-  credentials import --url <RP> <파일>  /1 RP의 위임 VC를 파일에서 저장합니다(§8 회수가 없는 RP용).
+  credentials import --url <RP> <파일>  위임 VC를 파일에서 저장합니다(§8 회수가 없는 RP용).
                                         [--route <경로>] 기본은 그 위임의 첫 scope.
   credentials unhold --url <RP>         보류된 위임을 다시 씁니다(RP가 갱신된 뒤). [--route <경로>]
   route rename --url <RP> <경로> <새 이름>  위임 경로 이름을 바꿉니다. 같은 경로의 새 위임은 이전 것을 대체합니다.
 
-RP 하나만 다룰 때
-  register --url <RP> --code <코드>     에이전트만 등록합니다(데몬 설정은 바꾸지 않습니다).
-                                        RP가 등록을 회수했다면 새 코드로 이 명령을 다시 실행하세요.
-  proxy --url <RP> [--port <N>]         RP 하나만 중계합니다(이전 방식).
-  session --url <RP>                    세션 bearer를 한 번 발급해 출력합니다.
+에이전트
   did                                   이 에이전트의 did:jwk를 출력합니다.
 
 업데이트
@@ -925,13 +671,12 @@ RP 하나만 다룰 때
                                         --check: 내려받지 않고 버전만 비교합니다.
 
 옵션
-  --port <N>             up·proxy 포트(기본 8787, 127.0.0.1에서만). up에 주면 이번 실행에만 적용됩니다.
+  --port <N>             up 포트(기본 8787, 127.0.0.1에서만). 이번 실행에만 적용됩니다.
   --mcp-path <경로>      RP의 MCP 경로(기본 /api/mcp)
   --key-file <경로>      키 파일(기본 ~/.metapass-agent/key.json, 환경 변수 METAPASS_AGENT_KEY_FILE)
   --key-backend <종류>   file(기본) 또는 keychain(macOS 키체인, Linux libsecret).
                          keychain을 처음 쓰면 기존 key.json을 옮겨 옵니다. 옮긴 뒤 파일은 지우세요.
-  --insecure-no-token    proxy: 로컬 토큰 없이 엽니다(권장하지 않음).
-  --force                이미 등록돼 있어도 다시 등록합니다. add --verifier에서는 기존 v0 RP를 /1로 바꿉니다.
+  --force                효과 없음 — 이전 명령(add --verifier --force)이 그대로 돌도록 받아 둡니다.
   -v, --version          버전을 출력합니다.
   -h, --help             이 도움말을 출력합니다.
   --url·--code는 환경 변수 BRIEFICK_URL·PAIRING_CODE로도 줄 수 있습니다.
@@ -939,31 +684,9 @@ RP 하나만 다룰 때
 위임이 거부되면(RP의 constraint_denied)
   constraints_missing·malformed·not_atomic   그 위임은 쓸 수 없습니다. 지우고 새 승인을 기다립니다.
   constraints_unknown_key                    RP가 아직 모르는 제약입니다. 위임은 보관하고 다시 시도하지 않습니다.
-                                             RP가 갱신되면 데몬을 다시 시작하세요(/1 RP는 credentials unhold).
+                                             RP가 갱신되면 credentials unhold 후 데몬을 다시 시작하세요.
 
 알 수 없는 옵션이 있으면 아무것도 실행하지 않고 끝납니다.`;
-
-/**
- * The one place a client is constructed, so the version it reports is wired once.
- *
- * 🔴 There were **five** call sites and the version was added to each by hand. A test that builds
- * its own client cannot see that wiring at all — measured: sabotaging the version to a tag-shaped
- * `v0.5.6` left all five tests green, because none of them went through here.
- *
- * ⚠️ I counted four. The fifth was the `up` daemon loop, found by `[Briefick]` grepping rather
- * than trusting the count — and it is the **longest-running** path, so an agent that upgrades and
- * keeps running would have been the one case never reporting a version. A guard that catches a
- * sixth does not exist; this comment is what there is.
- */
-export function agentClient(baseUrl: string, key: AgentKey): BriefickAgentClient {
-  // ⚠️ The same `packageVersion()` null is a **hard failure** for `--version` and a **silent
-  //    omission** here, and that is deliberate: refusing to register because the CLI cannot read
-  //    its own version would be worse than registering without reporting one. briefick reads the
-  //    absent key as "keep what you have" (`[metapass-saas]`, review of #24, who measured that the
-  //    null does not actually occur in the SEA — `build-sea.mjs` bakes `__AGENT_VERSION__` and
-  //    fails the build if it is missing).
-  return new BriefickAgentClient({ baseUrl, key, version: packageVersion() ?? undefined });
-}
 
 /**
  * The MCP endpoint for an RP, assembled in one place.
@@ -971,11 +694,11 @@ export function agentClient(baseUrl: string, key: AgentKey): BriefickAgentClient
  * 🔴 There were two assembly sites and no test could reach either. Every test that touches
  * `targetMcpUrl` **passes the finished value in** (`test/daemon.test.ts`, `test/proxy.test.ts`),
  * which makes them structurally unable to see how it is built — adding cases to them would never
- * reach the assembly (`[metapass-saas]`, review of #23). Same shape as `agentClient()`: consolidate
- * first, and the test that follows is reaching production code rather than its own construction.
+ * reach the assembly (`[metapass-saas]`, review of #23). Consolidate first, and the test that follows is
+ * reaching production code rather than its own construction.
  */
 export function mcpUrlFor(baseUrl: string, mcpPath?: string): string {
-  return baseUrl.replace(/\/+$/, "") + (mcpPath ?? DEFAULT_SERVICE.mcpPath);
+  return baseUrl.replace(/\/+$/, "") + (mcpPath ?? DEFAULT_RP_PATHS.mcpPath);
 }
 
 /**
@@ -1005,8 +728,7 @@ async function httpBinary(url: string): Promise<Buffer> {
  * trusts only the first key cannot take a release signed by the next one, which is the failure the
  * list exists to prevent, and it would first appear on a user's machine on the rotation day.
  *
- * ⚠️ Same shape as `agentClient()` on #24: an object built inline is invisible to every test that
- * builds its own.
+ * ⚠️ An object built inline is invisible to every test that builds its own.
  */
 export function upgradeIo(log: (line: string) => void = (l) => console.log(l)): UpgradeIo {
   return { fetchText: httpText, fetchBinary: httpBinary, publicKeyTexts: MINISIGN_PUBLIC_KEYS, log };
@@ -1058,6 +780,10 @@ export async function main(argv: string[]): Promise<number> {
     return args.cmd ? 0 : 1;
   }
 
+  if (REMOVED_V0_COMMANDS.includes(args.cmd)) {
+    return fail(`'${args.cmd}' was removed with v0 (${V0_REMOVED_ON}). Use: ${readdCommand("<RP_URL>", undefined, invocation(), true)}, then ${invocation()} up`);
+  }
+
   if (args.cmd === "did") {
     const store = openAgentStore(args);
     const { key, created } = await keyFrom(store);
@@ -1065,51 +791,6 @@ export async function main(argv: string[]): Promise<number> {
     // 모든 did:jwk는 앞자리가 같아 육안 구분 불가 — 에이전트 페이지가 표시하는 지문과 1:1 대조용.
     console.error(`지문: ${key.fingerprint} (Briefick 에이전트 페이지의 지문과 대조)`);
     if (created) console.error(`(신규 키 생성·저장: ${store.location})`);
-    return 0;
-  }
-
-  if (args.cmd === "register") {
-    if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
-    const store = openAgentStore(args);
-    const { key, data, created } = await keyFrom(store);
-    // 로컬 플래그만 믿고 스킵하면 서버에서 등록이 회수된 경우 새 코드가 미사용 만료된다 —
-    // 코드가 주어졌으면 사용자가 재등록을 의도한 것이므로 항상 서버에 등록한다.
-    if (data.registrations?.[args.url] && !args.force && !args.code) {
-      console.log(
-        `이미 등록됨(로컬 기록) — 재사용합니다.\n  DID: ${key.did}\n  지문: ${key.fingerprint}\n  키: ${store.location}\n` +
-          `  서버에서 등록이 회수된 상태라면 에이전트 페이지의 새 코드로 --code를 주어 다시 실행하세요`,
-      );
-      return 0;
-    }
-    if (!args.code) return fail("--code (또는 PAIRING_CODE) 필요 — Briefick 에이전트 페이지의 페어링 코드");
-    const client = agentClient(args.url, key);
-    await client.register(args.code, registerLabel(args));
-    updateStore(store, data, (s) => { s.registrations = { ...(s.registrations ?? {}), [args.url!]: true }; });
-    console.log(
-      `✅ 등록 완료.\n  DID: ${key.did}\n  지문: ${key.fingerprint} (에이전트 페이지 표시와 대조)\n  키 저장: ${store.location} — 이후 재실행 시 재사용(재등록 불필요)${
-        created ? "" : "\n  (기존 키 재사용)"
-      }`,
-    );
-    return 0;
-  }
-
-  if (args.cmd === "session") {
-    if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
-    const store = openAgentStore(args);
-    const { key, data } = await keyFrom(store);
-    const client = agentClient(args.url, key);
-    const cred = await ensureCredential(client, data, args.url, store, key);
-    let r;
-    try {
-      r = await client.exchange(cred);
-    } catch (e) {
-      const fresh = await recoverSessionFailure(e, client, data, args.url, store, key);
-      if (!fresh) throw e;
-      r = await client.exchange(fresh); // 재발급 위임으로 1회 재시도
-    }
-    if (r.status !== "issued" || !r.bearer) return fail(`세션 발급 실패: ${r.status}`);
-    console.log(r.bearer); // stdout=bearer (파이프 가능), 안내는 stderr
-    console.error(`(만료 ${r.expiresAt}, scope ${JSON.stringify(r.scope)})`);
     return 0;
   }
 
@@ -1215,57 +896,39 @@ export async function main(argv: string[]): Promise<number> {
 
   if (args.cmd === "add") {
     const url = (args.sub ?? args.url)?.replace(/\/+$/, "");
-    if (!url) return fail("사용: add <RP_URL> [--code <CODE>] [--alias <이름>] [--mcp-path /api/mcp]");
+    if (!url) return fail("사용: add <RP_URL> --verifier <검증자 URL> [--code <CODE>] [--verifier-rp <별칭>] [--alias <이름>]");
+    if (!args.verifier) return fail(addNeedsVerifier(url));
     const store = openAgentStore(args);
-    const { key, data } = await keyFrom(store);
+    const { key } = await keyFrom(store);
     const dir = configDir(args.keyFile);
     const cfg = loadConfig(dir);
     const alias = args.alias ?? aliasFromUrl(url);
     if (cfg.rps.some((r) => r.alias === alias && r.url !== url)) {
       return fail(`alias 충돌: '${alias}' — --alias 로 다른 이름을 지정하세요`);
     }
-    // 페어링(register) 통합 — 이미 등록돼 있으면 code 불필요.
-    // ⚠️ **단, --code 가 주어지면 로컬 플래그가 true 여도 다시 등록한다** — 서버에서 토큰이 회수된 뒤
-    //    재등록하는 경로가 바로 이것이다(register 명령과 같은 규칙). 종전에는 로컬 플래그만 보고
-    //    **code 를 무시한 채 ✅ 를 찍어서**, 사용자는 재등록했다고 믿지만 데몬은 여전히 401 을 돌렸다
-    //    (metapass-saas 실측 · briefick#18). 「성공처럼 보이는 실패」의 CLI 판이다.
-    // Converting a v0 RP stops its pairing-based connect loop; never do that by accident (Briefick). Checked before any
-    // network call: pairing first would consume a --code that a refused conversion can't use again (P3).
+    // An existing entry for this alias (a v0 one included) is replaced by the /1 entry below; v0 has nothing left to stop.
     const existing = cfg.rps.find((r) => r.alias === alias);
-    if (args.verifier && existing && !existing.verifierUrl && !args.force) {
-      return fail(`'${alias}' 는 v0 RP 입니다 — /1 로 바꾸려면 --force (되돌리기: remove ${alias} 후 add --code)`);
-    }
     // /1 (spec §17): the verifier's signed registry entry names the RP's legs, and its resource must be the URL typed.
-    let entry: Awaited<ReturnType<typeof fetchRpEntry>> & { pairing: string; pickup: string } | null = null;
-    if (args.verifier) {
-      try {
-        entry = requireV1(await fetchRpEntry({ verifierUrl: args.verifier, alias: args.verifierRp ?? alias, rpUrl: url }));
-        if (args.code) {
-          await pairV1({ resource: entry.resource, path: entry.pairing, key, code: args.code, label: registerLabel(args),
-            version: packageVersion() ?? undefined });
-          console.log(`✅ /1 페어링 완료 — 지문 ${key.fingerprint} (RP 화면의 지문과 대조)`);
-        }
-      } catch (e) {
-        if (e instanceof RpEntryError) return fail(e.message);
-        throw e;
+    let entry: RpEntry & { pairing: string; pickup: string };
+    try {
+      entry = requireV1(await fetchRpEntry({ verifierUrl: args.verifier, alias: args.verifierRp ?? alias, rpUrl: url }));
+      if (args.code) {
+        await pairV1({ resource: entry.resource, path: entry.pairing, key, code: args.code, label: registerLabel(args),
+          version: packageVersion() ?? undefined });
+        console.log(`✅ /1 페어링 완료 — 지문 ${key.fingerprint} (RP 화면의 지문과 대조)`);
       }
-    } else if (!data.registrations?.[url] || args.code) {
-      if (!args.code) return fail("--code 필요(최초 페어링) — RP의 에이전트 등록 화면에서 발급");
-      const client = agentClient(url, key);
-      await client.register(args.code, registerLabel(args));
-      updateStore(store, data, (s) => { s.registrations = { ...(s.registrations ?? {}), [url]: true }; });
+    } catch (e) {
+      if (e instanceof RpEntryError) return fail(e.message);
+      throw e;
     }
-    const v1 = args.verifier && entry
-      ? { verifierUrl: args.verifier.replace(/\/+$/, ""), verifierRp: args.verifierRp ?? alias, pickupPath: entry.pickup,
-          ...(entry.mcp ? { mcpPath: entry.mcp } : {}) }
-      : {};
+    const v1 = { verifierUrl: args.verifier.replace(/\/+$/, ""), verifierRp: args.verifierRp ?? alias, pickupPath: entry.pickup,
+      ...(entry.mcp ? { mcpPath: entry.mcp } : {}) };
     if (!existing) {
       cfg.rps.push({ alias, url, ...(args.mcpPath ? { mcpPath: args.mcpPath } : {}), ...v1 } satisfies DaemonRp);
-      saveConfig(dir, cfg);
-    } else if (args.verifier) {
+    } else {
       Object.assign(existing, v1);
-      saveConfig(dir, cfg);
     }
+    saveConfig(dir, cfg);
     const token = ensureToken(dir);
     const port = cfg.port ?? 8787;
     console.log(`✅ RP 추가: ${alias} → ${url}\n  지문: ${key.fingerprint}`);
@@ -1327,7 +990,7 @@ export async function main(argv: string[]): Promise<number> {
     const sessions = await daemonSessions(port, token);
     console.log(`agent ${key ? key.fingerprint : "(키 없음)"}  ·  daemon: ${daemon}`);
     if (cfg.rps.length === 0) {
-      console.log("  등록된 RP 없음 — add <RP_URL> --code <CODE> 로 시작하세요");
+      console.log("  등록된 RP 없음 — add <RP_URL> --verifier <검증자 URL> --code <CODE> 로 시작하세요");
       return 0;
     }
     const delegationLine = (cred: string | undefined, held: HeldCredential | undefined): string => {
@@ -1341,8 +1004,12 @@ export async function main(argv: string[]): Promise<number> {
         : (leftMs < 24 * 3600_000 ? "⚠ 위임 만료 임박 " : "✓ 위임 유효 ") + `(${formatLeft(leftMs)} 남음)`;
     };
     for (const rp of cfg.rps) {
+      if (!rp.verifierUrl) {
+        console.log(`  ${rp.alias.padEnd(10)} ✗ ${v0TargetMessage(rp)}`);
+        continue;
+      }
       const live = sessions?.find((t) => t.alias === rp.alias);
-      const routes = rp.verifierUrl ? slotsOf(data?.credentials, rp.url) : [];
+      const routes = slotsOf(data?.credentials, rp.url);
       if (routes.length === 0) {
         console.log(`  ${rp.alias.padEnd(10)} ${delegationLine(data?.credentials?.[rp.url], data?.held?.[rp.url])}`);
         const sess = sessionLine(live);
@@ -1429,7 +1096,7 @@ export async function main(argv: string[]): Promise<number> {
   if (args.cmd === "up" && args.install) {
     const dir = configDir(args.keyFile);
     const cfg = loadConfig(dir);
-    if (cfg.rps.length === 0) return fail("등록된 RP 없음 — 먼저 add <RP_URL> --code <CODE>");
+    if (cfg.rps.length === 0) return fail("등록된 RP 없음 — 먼저 add <RP_URL> --verifier <검증자 URL> --code <CODE>");
     ensureToken(dir); // 유닛 기동 전에 토큰·권한 선검증(fail-closed를 설치 시점에 노출)
     const r = installUnit(join(dir, "daemon.log"));
     console.log(`✅ OS 데몬 설치·시작(${r.kind}): ${r.unitPath}`);
@@ -1441,34 +1108,13 @@ export async function main(argv: string[]): Promise<number> {
   if (args.cmd === "up") {
     const dir = configDir(args.keyFile);
     const cfg = loadConfig(dir);
-    if (cfg.rps.length === 0) return fail("등록된 RP 없음 — 먼저 add <RP_URL> --code <CODE>");
+    if (cfg.rps.length === 0) return fail("등록된 RP 없음 — 먼저 add <RP_URL> --verifier <검증자 URL> --code <CODE>");
     const store = openAgentStore(args);
     const { key, data } = await keyFrom(store);
     const token = ensureToken(dir);
 
     const targets: DaemonTarget[] = [];
-    for (const rp of cfg.rps) {
-      const target: DaemonTarget = {
-        alias: rp.alias,
-        targetMcpUrl: mcpUrlFor(rp.url, rp.mcpPath),
-        auth: null,
-        pendingReason: "위임 미확보 — 지갑에서 승인하면 자동 연결됩니다",
-      };
-      targets.push(target);
-      if (rp.verifierUrl) {
-        const pickupDeps: V1Deps = {
-          pickup: () => pickup(pickupOptionsFor(rp, key)),
-        };
-        connectV1Target(target, data, { ...rp, verifierUrl: rp.verifierUrl }, store, key, pickupDeps).catch((e: unknown) => {
-          target.pendingReason = `/1 연결 실패: ${e instanceof Error ? e.message : String(e)}`;
-          console.error(`[${rp.alias}] ${target.pendingReason}`);
-        });
-        continue;
-      }
-      const client = agentClient(rp.url, key);
-      void connectTarget(target, client, data, rp, store, key);
-      void watchForNewerDelegation(target, client, data, rp, store, key);
-    }
+    for (const rp of cfg.rps) targets.push(daemonTargetFor(rp, data, store, key));
 
     // 🔴 **`up` 도 `--port` 를 읽는다**(briefick 리뷰). 종전엔 `cfg.port` 만 봐서
     //    `up --port 9999` 가 **조용히 무시**됐다 — 파서가 아는 플래그라 거부망에도 안 걸린다.
@@ -1497,67 +1143,6 @@ export async function main(argv: string[]): Promise<number> {
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
     await new Promise<void>(() => {});
-    return 0;
-  }
-
-  if (args.cmd === "proxy") {
-    if (!args.url) return fail("--url (또는 BRIEFICK_URL) 필요");
-    const store = openAgentStore(args);
-    const { key, data } = await keyFrom(store);
-    const client = agentClient(args.url, key);
-    let credential = await ensureCredential(client, data, args.url, store, key);
-    let auth: AgentAuth;
-    for (let attempt = 0; ; attempt++) {
-      auth = new AgentAuth({
-        client,
-        credential,
-        onRefresh: (_b, exp) => console.error(`[proxy] 세션 bearer 갱신 (만료 ${exp.toISOString()})`),
-        onError: (e) => console.error(`[proxy] 세션 갱신 실패(재시도됨): ${e}`),
-        onFatal: (e) => console.error(`[proxy] 세션 갱신 **영구 실패** — 재시도 중단. 재등록 필요(register --code): ${e}`),
-      });
-      try {
-        await auth.start();
-        break;
-      } catch (e) {
-        const fresh = attempt === 0 ? await recoverSessionFailure(e, client, data, args.url, store, key) : null;
-        if (!fresh) throw e;
-        credential = fresh; // 재발급 위임으로 1회 재시도
-      }
-    }
-
-    const base = args.url.replace(/\/+$/, "");
-    const targetMcpUrl = mcpUrlFor(base, args.mcpPath);
-    const alias = aliasFromUrl(base);
-    // 로컬 인증 토큰 기본 적용(doc26 §2-5) — 무토큰은 --insecure-no-token 명시 시에만
-    let proxy: { url: string; port: number; close(): Promise<void> };
-    if (args.insecureNoToken) {
-      console.error("⚠ --insecure-no-token: 같은 호스트의 모든 프로세스가 이 프록시(=에이전트 권한)를 호출할 수 있습니다");
-      proxy = await startProxy({ auth, targetMcpUrl, port: args.port ?? 8787 });
-      console.error(`\nClaude Code 등록:\n   claude mcp add --transport http ${alias} ${proxy.url}\n`);
-    } else {
-      const token = ensureToken(configDir(args.keyFile));
-      const daemon = await startDaemon({
-        targets: [{ alias, targetMcpUrl, auth }],
-        token,
-        port: args.port ?? 8787,
-      });
-      proxy = { url: daemon.urls[alias], port: daemon.port, close: daemon.close };
-      console.error(`\nClaude Code 등록(복사-실행):\n   ${mcpAddCommand(alias, daemon.port, token, true)}\n`);
-    }
-
-    console.error(`✅ 로컬 MCP 프록시 실행: ${proxy.url}  →  ${targetMcpUrl}`);
-    console.error(`   에이전트 DID: ${key.did}`);
-    console.error(`   지문: ${key.fingerprint} (에이전트 페이지 표시와 대조)`);
-    console.error("(Ctrl+C 로 종료)");
-
-    const stop = async () => {
-      auth.stop();
-      await proxy.close();
-      process.exit(0);
-    };
-    process.on("SIGINT", stop);
-    process.on("SIGTERM", stop);
-    await new Promise<void>(() => {}); // 포그라운드 유지(프록시가 이벤트루프를 잡음)
     return 0;
   }
 

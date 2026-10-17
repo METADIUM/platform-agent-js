@@ -28,8 +28,6 @@ export interface DaemonTarget {
   auth: BearerSource | CallAuth | null;
   /** auth가 null일 때 503 본문에 실을 사유. */
   pendingReason?: string;
-  /** A delegation the RP refused with §11.1 `keep`: still stored, not presented again by this process. */
-  heldCredential?: string;
   /**
    * §15: a `/1` RP's delegations, one daemon route each (`/<alias>/<route>/mcp`). Present for `/1` targets; then this
    * target's own `auth` stays null and `pendingReason` says why there is no route yet.

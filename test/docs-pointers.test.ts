@@ -14,7 +14,6 @@ const PLATFORM_DOCS = join(ROOT, "..", "platform-docs");
 const REQUIRED_POINTERS: Record<string, string> = {
   "src/release-key.ts": "42-agent-cli-release-key-rotation.md",
   "src/wire-surface.ts": "43-agent-cli-wire-compatibility.md",
-  "src/delegation-refresh.ts": "44-agent-delegation-refresh.md",
 };
 
 /**

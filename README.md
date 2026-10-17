@@ -5,62 +5,48 @@ A Node/TypeScript **holder client and CLI** that lets an AI agent (Claude Code, 
 **scoped, time-bound, revocable delegation** (scenario #8 in `platform-docs/22`).
 
 - **did:jwk keys** (ES256 / P-256) — generation and storage
-- **PoP JWTs** (proof of possession) — registration, retrieval, session exchange
+- **agent-delegation `/1`**: pairing (§7), pickup of approved delegations (§8), the session-token
+  exchange at the verifier (§9) and a request proof (`Agent-Proof`) on every call to the RP (§10–§11)
 - **SD-JWT VC presentation + KB-JWT** (holder binding) — builds the delegation VP
-- Client for the **Briefick delegated-authentication contract** (register → retrieve → exchange)
-- **Automatic bearer refresh** — short-lived session tokens are re-exchanged before they expire,
-  so a client that only supports a fixed header keeps working
+- **A local daemon** that serves each RP to MCP clients on `127.0.0.1`, so a client that only
+  supports a fixed header keeps working while session tokens are refreshed underneath
+
+> **v0 was removed on 2026-10-17** (spec §20). The `register`, `session` and `proxy` commands and the
+> `AgentClient`/`BriefickAgentClient`/`AgentAuth` library API are gone, and every RP has removed its v0
+> endpoints. An RP added with an older version without `--verifier` is reported by `up` and `status`
+> with the command that re-adds it over `/1`.
 
 > **Why cryptography lives in Node here.** The agent is the **holder** of the delegation VC, so it
-> has to sign KB-JWTs and PoPs **locally with its own private key** — delegating that signing to a
-> remote service would break holder binding. Unlike a verifier (RP), holder cryptography cannot be
-> offloaded, so it has to run where the agent runs (Node / MCP). The surface is kept small on
-> purpose: **holder presentation path only, ES256 only**, and the wire format is cross-checked
-> against `platform-java` (see below).
+> has to sign KB-JWTs and request proofs **locally with its own private key** — delegating that
+> signing to a remote service would break holder binding. Unlike a verifier (RP), holder
+> cryptography cannot be offloaded, so it has to run where the agent runs (Node / MCP). The surface
+> is kept small on purpose: **holder presentation path only, ES256 only**, and the wire format is
+> cross-checked against `platform-java` (see below).
 
 ## CLI (one `npx` line, no clone needed)
 
 ```bash
-# Register (once — pairing code from Briefick /publish)
-npx @metadium-did/platform-agent-js register --url <BRIEFICK_URL> --code <PAIRING_CODE>
+# Add an RP and pair with it (pairing code from the RP's agents page)
+npx @metadium-did/platform-agent-js add <RP_URL> --verifier <VERIFIER_URL> --code <PAIRING_CODE>
 
-npx @metadium-did/platform-agent-js did                                     # print this agent's did:jwk
-npx @metadium-did/platform-agent-js session --url <BRIEFICK_URL>            # issue one session bearer to stdout
-npx @metadium-did/platform-agent-js credentials clear --url <BRIEFICK_URL>  # drop the cached delegation VC
+npx @metadium-did/platform-agent-js up --install   # run the daemon as an OS service
+npx @metadium-did/platform-agent-js status         # delegations, sessions, and the `claude mcp add` lines
+npx @metadium-did/platform-agent-js did            # print this agent's did:jwk and fingerprint
 ```
 
-**Recovering from server/local state drift (0.2.4).** After an RP revokes a registration, or the
-user revokes the delegation, the CLI guides recovery instead of failing opaquely:
+`add` reads the RP's legs (pairing, pickup, MCP paths) from the verifier's signed registry entry
+(`GET <verifier>/rp/<alias>`, §17) and refuses an RP the verifier registers at another URL. Use
+`--verifier-rp <alias>` when the RP's alias at the verifier differs from the one derived from its URL.
+After the wallet approves a delegation, the daemon picks it up by itself; each delegation gets a
+route `127.0.0.1:<port>/<alias>/<route>/mcp` (§15).
 
-1. `register` with `--code` registers against the server regardless of a local "already registered"
-   record, so re-registration after a revocation works.
-2. A 401 on session exchange fails with guidance to run `register --force` with a fresh pairing code.
-3. If a session is refused because the delegation is no longer valid, the cached credential is
-   **discarded automatically**, the client switches to waiting for wallet re-approval, and retries once.
-4. A pending-session timeout points at `credentials clear`.
+`did` prints the agent's **fingerprint** (first 10 hex characters of `sha256(did:jwk)`). Every
+did:jwk starts with the same prefix, so they cannot be told apart by eye; compare the fingerprint
+with the one the RP shows to confirm **which agent** a delegation is issued to.
 
-**Telling expiry apart from waiting (0.2.5).** If a request expires while re-issuance is pending —
-either the RP reports `status: "expired"` or `lastRequest.expiresAt` has passed (kept for backward
-compatibility) — the CLI says **"the request expired; issue the delegation again from /publish"**
-rather than "waiting for approval". The transition is detected even if it happens mid-wait. The 401
-message also carries the server's own reason (`error`) when the RP sends one.
-
-`--url` and `--code` can also be supplied as `BRIEFICK_URL` and `PAIRING_CODE`.
-
-`did`, `register` and `proxy` also print the agent's **fingerprint** (first 10 hex characters of
-`sha256(did:jwk)`). Every did:jwk starts with the same prefix, so they cannot be told apart by eye;
-compare the fingerprint with the one Briefick shows on `/publish` to confirm **which agent** a
-delegation is being issued to. While a delegation is being retrieved, the RP's finer-grained signals
-select the guidance: `no_request` (no delegation was issued to this agent — check the fingerprint on
-`/publish`) or `pending` with `lastRequest` (a request exists and is waiting for wallet approval and
-delivery; on timeout, suspect that the wallet callback failed to arrive).
-
-**Key persistence (register once, reuse afterwards).** The key is stored in
-`~/.metapass-agent/key.json` (file mode 0600, directory 0700). Re-running reuses the same did:jwk,
-so **the agent is not re-registered as a new one every time**. `register` **skips re-registration
-automatically** for a URL that is already registered — use `--force` to do it anyway. Change the
-path with `--key-file <PATH>` or `METAPASS_AGENT_KEY_FILE`. The private key stays in that store and
-is never sent over the network.
+**Key persistence.** The key is stored in `~/.metapass-agent/key.json` (file mode 0600, directory
+0700), so the agent keeps the same did:jwk across runs. Change the path with `--key-file <PATH>` or
+`METAPASS_AGENT_KEY_FILE`. The private key stays in that store and is never sent over the network.
 
 **Key storage security.** On load, file permissions are checked, and anything readable beyond the
 owner (not 0600) is **refused**, the way ssh does, with a `chmod 600` hint. If you would rather not
@@ -77,33 +63,23 @@ of it gets is a short-lived session within the delegated scope, and revoking the
 wallet invalidates it immediately — keeping scope and lifetime small at issuance time is the most
 effective defence.
 
-## Local proxy mode — using this with Claude Code
+## The daemon — using this with Claude Code
 
 Claude Code, as an MCP client, supports only a **fixed `Authorization` header**, while a delegation
-bearer is short-lived and refreshed. A local proxy bridges the two: the fixed header goes to the
-proxy, and the proxy injects the current bearer.
+session token is short-lived and every call to the RP carries a fresh request proof. The daemon
+bridges the two: Claude Code sends its fixed local token to the daemon, and the daemon adds the
+session token and proof for the RP.
 
 ```text
-Claude Code ──(fixed header, localhost)──▶ proxy ──(current bearer)──▶ https://…/api/mcp
+Claude Code ──(local token, 127.0.0.1)──▶ daemon ──(Delegation token + Agent-Proof)──▶ RP /mcp
 ```
 
-```bash
-# 1) Run the proxy in the foreground — it refreshes and injects the session bearer
-npx @metadium-did/platform-agent-js proxy --url <BRIEFICK_URL> [--port 8787]
-
-# 2) Register that local proxy with Claude Code as an MCP server (in another terminal)
-claude mcp add --transport http briefick http://127.0.0.1:8787/mcp
-```
-
-- **Binds 127.0.0.1 only.** Default port **8787** (`--port`); default upstream MCP path `/api/mcp`
-  (`--mcp-path`).
-- **Transparent forwarding**: method, body, headers and the response stream (**including SSE**) pass
-  through unchanged; only `Authorization` is overwritten with the current bearer.
-- **Expiry and revocation**: a 401 or refusal from the RP is **passed straight through** — the proxy
-  makes no judgement of its own. The bearer keeps refreshing, so the next request carries a new one.
-- **Runs in the foreground** (Ctrl+C to stop). Wrap it in `launchd`, `pm2` or similar to keep it
-  resident. On first run it retrieves the delegation VC (after wallet approval) and saves it to
-  `~/.metapass-agent/key.json`, so a restart does not need approval again.
+- **Binds 127.0.0.1 only.** Default port **8787** (`--port`). Every request except `GET /healthz`
+  needs the local token printed by `add` and `status`.
+- **Transparent forwarding**: method, body and the response stream (**including SSE**) pass through;
+  only the authorization headers are set by the daemon.
+- **Limits the RP enforces** (§11.1) are kept: a delegation the RP cannot use is dropped, and one
+  whose limits the RP does not understand yet is held until `credentials unhold`.
 
 ## Install the CLI (single binary)
 
@@ -137,95 +113,28 @@ previous version is still in place and still running.
 npm install @metadium-did/platform-agent-js
 ```
 
-## Quick start
+## Library API — a session token for a stored delegation
+
+The programmatic entry point is **ESM `dist/index.js` with types in `dist/index.d.ts`**.
 
 ```ts
-import { AgentKey, BriefickAgentClient, AgentAuth } from "@metadium-did/platform-agent-js";
+import { AgentKey, exchangeSessionToken, loadStore, defaultKeyFile } from "@metadium-did/platform-agent-js";
 
-// 1) Agent key — generate once, then persist it so the did:jwk stays the same
-const key = await AgentKey.generate();
-console.log("this agent's DID:", key.did);       // did:jwk:...  (register this in the Briefick UI)
-// fs.writeFileSync("agent-key.json", JSON.stringify(key.exportPrivateJwk()));
-// const key = await AgentKey.fromPrivateJwk(JSON.parse(fs.readFileSync("agent-key.json","utf8")));
-
-const client = new BriefickAgentClient({ baseUrl: process.env.BRIEFICK_URL!, key });
-
-// 2) Register — bind with the pairing code the user issued from Briefick /publish (PoP)
-await client.register(process.env.PAIRING_CODE!);
-
-// 3) Once the user approves the delegation in their wallet, retrieve the VC (polling)
-const credential = await client.waitForDelegation();
-
-// 4) Exchange for a session bearer and keep it refreshed before expiry
-const auth = new AgentAuth({
-  client,
-  credential,
-  onRefresh: (bearer) => console.log("new session bearer:", bearer), // push into the fixed MCP header
-});
-await auth.start();
-
-// 5) From here on, MCP calls always carry a valid bearer
-await fetch(process.env.BRIEFICK_URL + "/api/mcp", { headers: auth.authHeader() });
-```
-
-## Library API — importing it to get a bearer
-
-The programmatic entry point is **ESM `dist/index.js` with types in `dist/index.d.ts`**. Get a bearer
-either from `AgentAuth` (refreshed automatically) or from `AgentClient.exchange` (one-shot).
-
-```ts
-import { AgentKey, AgentClient, AgentAuth, loadStore, defaultKeyFile } from "@metadium-did/platform-agent-js";
-
-// Reuse the key and delegation VC the CLI already stored
+// Reuse the key and a delegation VC the CLI already stored
 const store = loadStore(defaultKeyFile())!;
 const key = await AgentKey.fromPrivateJwk(store.privateJwk);
-const client = new AgentClient({ baseUrl: "https://briefick.cplabs.io", key });
-const credential = store.credentials!["https://briefick.cplabs.io"]; // the retrieved, stored delegation VC
+const vc = Object.values(store.credentials ?? {})[0];
 
-// (a) Automatic refresh — bearer() / authHeader()
-const auth = new AgentAuth({ client, credential });
-await auth.start();
-auth.bearer();        // string  — the current session bearer
-auth.authHeader();    // { Authorization: "Bearer …" }
-auth.stop();
-
-// (b) One-shot exchange
-const r = await client.exchange(credential);  // { status:"issued", bearer, expiresAt, scope }
+// §9: present the VC at the verifier and receive a short-lived session token for one RP
+const t = await exchangeSessionToken({ verifierUrl: "https://sso.cplabs.io", vc, rp: "briefick", key });
+t.accessToken;   // sent as `Authorization: Delegation <token>`, with an Agent-Proof per call (§10–§11)
 ```
 
-### Service-neutral (other RPs)
+## The `/1` requests
 
-`AgentClient` takes its endpoint paths and PoP `aud` values **from configuration**, defaulting to the
-Briefick contract. For another service, pass `service`:
-
-```ts
-new AgentClient({ baseUrl, key, service: {
-  registerPath: "/v2/agents/enroll",
-  retrievePath: "/v2/agents/delegation",
-  sessionStartPath: "/v2/agents/session/start",
-  sessionCompletePath: "/v2/agents/session/complete",
-  popAudience: { register: "acme-enroll", retrieve: "acme-retrieve", session: "acme-session" },
-  mcpPath: "/v2/mcp",
-}});
-```
-
-`BriefickAgentClient` is an alias for the preset defaults (`=== AgentClient`), kept for backward
-compatibility. The holder cryptography (`AgentKey`, `presentVpToken`), `AgentAuth` and `startProxy`
-are service-independent.
-
-## The flow (Briefick's default contract)
-
-```text
-register   POST /api/agent/register             {didJwk, code, pop(aud=briefick-agent-register)}
-retrieve   POST /api/agent/delegation/retrieve  {didJwk, pop(aud=briefick-agent-retrieve)}  → {credential}
-session    POST /api/agent/session/start        {didJwk, pop(aud=briefick-agent-session)}   → {state, nonce, responseUri}
-           (present the delegation VP to the sso responseUri)  POST {vpToken}
-           POST /api/agent/session/complete     {state, didJwk, pop}                        → {bearer, expiresAt, scope}
-```
-
-A PoP is an **ES256 JWT signed with the private key of the did:jwk being registered**, scoped by
-`aud` and carrying `iat`. Session bearers are short-lived, so `AgentAuth` re-exchanges before expiry.
-An MCP client keeps one fixed header and updates only its value, from `onRefresh`.
+`src/wire-surface.ts` (`WIRE_SURFACE`) declares every request this CLI sends — method, body fields
+and the headers it sets — and `test/wire-surface.test.ts` drives the real calls and compares, so a
+wire change cannot go unnoticed.
 
 ## Deployment-side values (Briefick env)
 

@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { CompactSign, exportJWK, generateKeyPair } from "jose";
 import http from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +10,7 @@ import { AgentKey } from "../src/key.js";
 import { openStore } from "../src/keystore.js";
 import { slotKey } from "../src/routes.js";
 import type { DelegationSessionAuth } from "../src/delegation-session.js";
+import { fakeVerifier as sharedFakeVerifier } from "./fake-verifier.js";
 
 /** The test VC has no scope, so it is served on the `default` route (§15). */
 const slot = (url: string) => slotKey(url, "default");
@@ -95,29 +95,10 @@ async function call(target: DaemonTarget) {
   return r.status;
 }
 
-/** A verifier that serves `GET /rp/<alias>` (spec §17) for `resource`, and its did.json; `pair` answers the RP's pairing. */
 async function fakeVerifier(alias: string, resource: string, pair?: (body: Record<string, unknown>) => Response) {
-  const v1 = await generateKeyPair("ES256");
-  const now = Math.floor(Date.now() / 1000);
-  const jws = await new CompactSign(new TextEncoder().encode(JSON.stringify({
-    iss: "did:web:sso.example.com", iat: now, exp: now + 300, alias, resource, protocol: "agent-delegation/1",
-    pairing: "/agent/pair", pickup: "/agent/delegation/pickup", mcp: "/mcp", requireBodyHash: true,
-  }))).setProtectedHeader({ alg: "ES256", typ: "delegation-rp-entry+jwt", kid: "did:web:sso.example.com#v1" }).sign(v1.privateKey);
-  const didJson = { id: "did:web:sso.example.com", verificationMethod: [{ id: "#v1", publicKeyJwk: await exportJWK(v1.publicKey) }] };
-  const pairs: Record<string, unknown>[] = [];
-  vi.stubGlobal("fetch", (async (url: string | URL, init?: RequestInit) => {
-    const u = String(url);
-    if (u === `https://sso.example.com/rp/${alias}`) return new Response(jws, { status: 200 });
-    if (u === "https://sso.example.com/.well-known/did.json") return Response.json(didJson);
-    if (pair && u === resource + "/agent/pair") {
-      const body = JSON.parse(Buffer.from(init!.body as Uint8Array).toString("utf8"));
-      pairs.push(body);
-      return pair(body);
-    }
-    return new Response("", { status: 404 });
-  }) as typeof fetch);
-  closers.push(() => vi.unstubAllGlobals());
-  return { pairs };
+  const v = await sharedFakeVerifier(alias, resource, pair);
+  closers.push(v.restore);
+  return v;
 }
 
 describe("CLI /1 targets (spec §9–§11.1)", () => {
@@ -197,16 +178,17 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     expect(openStore({ backend: "file", keyFile }).load()!.credentials?.[slot(url)]).toBe(vc());
   });
 
-  it("add --verifier won't silently convert a v0 RP; --force does (Briefick)", async () => {
+  it("add --verifier replaces a v0 entry; --force is no longer needed, and still accepted", async () => {
     const keyFile = tmpKeyFile();
     const dir = join(keyFile, "..");
     const url = "https://briefick.example.com";
     saveConfig(dir, { rps: [{ alias: "briefick", url }] });
     await fakeVerifier("briefick", url);
-    expect(await main(["add", url, "--verifier", "https://sso.example.com", "--key-file", keyFile])).toBe(1);
-    expect(loadConfig(dir).rps, "a refused conversion still changed the config").toEqual([{ alias: "briefick", url }]);
+    expect(await main(["add", url, "--verifier", "https://sso.example.com", "--key-file", keyFile])).toBe(0);
+    expect(loadConfig(dir).rps).toEqual([{ alias: "briefick", url, verifierUrl: "https://sso.example.com", verifierRp: "briefick",
+      pickupPath: "/agent/delegation/pickup", mcpPath: "/mcp" }]);
     expect(await main(["add", url, "--verifier", "https://sso.example.com", "--force", "--key-file", keyFile])).toBe(0);
-    expect(loadConfig(dir).rps[0]).toMatchObject({ verifierUrl: "https://sso.example.com", pickupPath: "/agent/delegation/pickup" });
+    expect(loadConfig(dir).rps).toHaveLength(1);
   });
 
   it("a conversion tells the user to restart a running daemon, which keeps its old config (Briefick B5)", async () => {
@@ -225,7 +207,7 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     const out: string[] = [];
     const log = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void out.push(a.join(" ")));
     try {
-      expect(await main(["add", url, "--verifier", "https://sso.example.com", "--force", "--key-file", keyFile])).toBe(0);
+      expect(await main(["add", url, "--verifier", "https://sso.example.com", "--key-file", keyFile])).toBe(0);
       expect(out.join("\n"), "a running daemon wasn't told to restart").toContain("재시작해야 반영됩니다");
       out.length = 0;
       daemonStatus = 401;   // a daemon after rotate-token: still running (Briefick)
@@ -259,15 +241,17 @@ describe("CLI /1 targets (spec §9–§11.1)", () => {
     expect(pickupOptionsFor({ alias: "m", url: "https://m.example.com" }, key).path).toBeUndefined();
   });
 
-  it("a refused v0 conversion pairs nothing: the --code survives for the retry with --force (Briefick)", async () => {
+  it("re-adding a v0 entry with --code pairs over /1 and converts it", async () => {
     const keyFile = tmpKeyFile();
     const dir = join(keyFile, "..");
     const url = "https://briefick.example.com";
+    const key = await AgentKey.generate();
+    openStore({ backend: "file", keyFile }).save({ privateJwk: key.exportPrivateJwk() });
     saveConfig(dir, { rps: [{ alias: "briefick", url }] });
-    const v = await fakeVerifier("briefick", url, () => Response.json({ paired: true, agent_fingerprint: "x" }));
-    expect(await main(["add", url, "--verifier", "https://sso.example.com", "--code", "C0DE1234", "--key-file", keyFile])).toBe(1);
-    expect(v.pairs, "the code was consumed by a conversion that was then refused").toHaveLength(0);
-    expect(loadConfig(dir).rps).toEqual([{ alias: "briefick", url }]);
+    const v = await fakeVerifier("briefick", url, () => Response.json({ paired: true, agent_fingerprint: key.fingerprint }));
+    expect(await main(["add", url, "--verifier", "https://sso.example.com", "--code", "C0DE1234", "--key-file", keyFile])).toBe(0);
+    expect(v.pairs).toHaveLength(1);
+    expect(loadConfig(dir).rps[0]).toMatchObject({ alias: "briefick", verifierUrl: "https://sso.example.com" });
   });
 
   it("add --verifier refuses an RP the verifier registers at another URL, and saves nothing", async () => {
