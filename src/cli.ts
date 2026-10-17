@@ -587,10 +587,16 @@ export const V0_REMOVED_ON = "2026-10-17";
 
 const REMOVED_V0_COMMANDS = ["register", "session", "proxy"];
 
-/** The `add` that turns a config entry into a `/1` one; `--alias` only when the entry's alias isn't the URL's default. */
-function readdCommand(url: string, alias: string | undefined, inv: string): string {
+/**
+ * The `/1` `add` for a URL; `--alias` only when the entry's alias isn't the URL's default. A key already paired
+ * there needs no code (Briefick), so `--code` is required only for a new pairing.
+ */
+function readdCommand(url: string, alias: string | undefined, inv: string, newPairing = false): string {
   const named = alias !== undefined && alias !== aliasFromUrl(url) ? ` --alias ${alias}` : "";
-  return `${inv} add ${url} --verifier <verifier-url>${named} --code <code from the RP's agents page>`;
+  const line = `${inv} add ${url} --verifier <verifier-url> --verifier-rp <alias at the verifier>${named}`;
+  return newPairing
+    ? `${line} --code <code> (the exact line, with its code, is on the RP's agents page)`
+    : `${line} (the exact line is on the RP's agents page; add --code <code> only if the RP asks for one)`;
 }
 
 /** What `up` and `status` say for a config entry without a verifier: a v0 target, which is never contacted. */
@@ -600,7 +606,7 @@ export function v0TargetMessage(rp: DaemonRp, inv: string = invocation()): strin
 
 /** `add` without `--verifier`: that was v0 pairing. */
 export function addNeedsVerifier(url: string, inv: string = invocation()): string {
-  return `--verifier is required: v0 pairing was removed (${V0_REMOVED_ON}). Use: ${readdCommand(url, undefined, inv)}`;
+  return `--verifier is required: v0 pairing was removed (${V0_REMOVED_ON}). Use: ${readdCommand(url, undefined, inv, true)}`;
 }
 
 /**
@@ -775,7 +781,7 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (REMOVED_V0_COMMANDS.includes(args.cmd)) {
-    return fail(`'${args.cmd}' was removed with v0 (${V0_REMOVED_ON}). Use: ${readdCommand("<RP_URL>", undefined, invocation())}, then ${invocation()} up`);
+    return fail(`'${args.cmd}' was removed with v0 (${V0_REMOVED_ON}). Use: ${readdCommand("<RP_URL>", undefined, invocation(), true)}, then ${invocation()} up`);
   }
 
   if (args.cmd === "did") {

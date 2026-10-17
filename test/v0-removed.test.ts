@@ -43,10 +43,13 @@ describe("v0 was removed (spec §20)", () => {
   it("names the target, the date and the re-add command", () => {
     expect(v0TargetMessage(V0, "mpa")).toBe(
       `'briefick' is a v0 target; v0 was removed (${V0_REMOVED_ON}). Re-add it with: ` +
-        "mpa add https://briefick.example.com --verifier <verifier-url> --code <code from the RP's agents page>",
+        "mpa add https://briefick.example.com --verifier <verifier-url> --verifier-rp <alias at the verifier> " +
+        "(the exact line is on the RP's agents page; add --code <code> only if the RP asks for one)",
     );
     // An alias the URL wouldn't give must be passed again, or the re-add creates a second entry beside the v0 one.
-    expect(v0TargetMessage({ alias: "bf", url: V0.url }, "mpa")).toContain("--verifier <verifier-url> --alias bf --code");
+    expect(v0TargetMessage({ alias: "bf", url: V0.url }, "mpa")).toContain("--verifier-rp <alias at the verifier> --alias bf (");
+    // A key already paired there converts without a code (Briefick): the re-add must not demand one.
+    expect(v0TargetMessage(V0, "mpa"), "the re-add demands a code an already-paired key doesn't need").not.toMatch(/--code <code> \(/);
   });
 
   it("🔴 add without --verifier is refused before any network call or config change", async () => {
@@ -56,6 +59,7 @@ describe("v0 was removed (spec §20)", () => {
     expect(await main(["add", V0.url, "--code", "C0DE1234", "--key-file", keyFile])).toBe(1);
     expect(err.join("\n")).toContain(addNeedsVerifier(V0.url));
     expect(err.join("\n")).toContain("--verifier is required");
+    expect(err.join("\n"), "a new pairing must be told it needs a code").toContain("--verifier-rp <alias at the verifier> --code <code>");
     expect(urls, "add without --verifier still went to the network").toEqual([]);
     expect(loadConfig(join(keyFile, "..")).rps).toEqual([]);
   });
