@@ -1,10 +1,17 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { AgentClient } from "../src/briefick.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { afterEach, describe, expect, it } from "vitest";
+import { AgentKey } from "../src/key.js";
+import { saveStore } from "../src/keystore.js";
+import { pairV1 } from "../src/rp-entry.js";
+import { pickup } from "../src/pickup.js";
+import { fakeVerifier } from "./fake-verifier.js";
 
 /**
- * The CLI reports its own version on register, so briefick can answer *"what fraction of agents
+ * The CLI reports its own version on pairing and on every pickup (`/1`; v0 `register` and `session/start` were
+ * removed on 2026-10-17), so briefick can answer *"what fraction of agents
  * is at or past release X"* with a query instead of a judgement.
  *
  * 🔴 Why this is worth a test rather than a field: it exists for **upstream signing-key rotation**
@@ -61,47 +68,38 @@ import { AgentClient } from "../src/briefick.js";
  */
 const BRIEFICK_SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]{1,24})?(?:\+[0-9A-Za-z.-]{1,24})?$/;
 
-function bodyOf(calls: Array<{ body: unknown }>): Record<string, unknown> {
-  return JSON.parse(String((calls[0] as { body: string }).body)) as Record<string, unknown>;
-}
+const cleanup: Array<() => void | Promise<void>> = [];
+afterEach(async () => {
+  for (const f of cleanup.splice(0)) await f();
+});
 
-async function captureSession(version?: string) {
-  const calls: Array<{ body: string }> = [];
-  const client = new AgentClient({
-    baseUrl: "https://rp.example",
-    version,
-    key: { did: "did:jwk:x", popJwt: async () => "pop" } as never,
-    fetchImpl: (async (_url: string, init: { body: string }) => {
-      calls.push(init);
-      return { ok: true, status: 200, text: async () => JSON.stringify({ state: "s", nonce: "n", responseUri: "u" }) };
-    }) as never,
-  });
-  await client.startSession();
-  return { body: JSON.parse(calls[0].body) as Record<string, unknown> };
+/** The JSON body of the one request `call` sends through the injected fetch. */
+async function sent(call: (fetchImpl: typeof fetch) => Promise<unknown>, reply: unknown): Promise<Record<string, unknown>> {
+  const bodies: Record<string, unknown>[] = [];
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    bodies.push(JSON.parse(Buffer.from(init.body as Uint8Array).toString("utf8")) as Record<string, unknown>);
+    return Response.json(reply);
+  }) as unknown as typeof fetch;
+  await call(fetchImpl);
+  expect(bodies, "no request was sent").toHaveLength(1);
+  return bodies[0];
 }
 
 // ⚠️ No default for `label`: a default parameter treats an EXPLICIT `undefined` as absent and
 //    substitutes it, so `capture(v, undefined)` would have tested the present case while reading
 //    as the absent one. Callers pass it explicitly.
 async function capture(version: string | undefined, label: string | undefined) {
-  const calls: Array<{ body: unknown }> = [];
-  const client = new AgentClient({
-    baseUrl: "https://rp.example",
-    version,
-    key: {
-      did: "did:jwk:x",
-      popJwt: async () => "pop",
-    } as never,
-    fetchImpl: (async (_url: string, init: { body: string }) => {
-      calls.push(init);
-      return { ok: true, status: 200, text: async () => JSON.stringify({ registered: true }) };
-    }) as never,
-  });
-  await client.register("CODE", label);
-  return bodyOf(calls);
+  const key = await AgentKey.generate();
+  return sent((fetchImpl) => pairV1({ resource: "https://rp.example", path: "/agent/pair", key, code: "CODE", label, version, fetchImpl }),
+    { paired: true, agent_fingerprint: key.fingerprint });
 }
 
-describe("the version this CLI reports on register", () => {
+async function capturePickup(version?: string) {
+  const key = await AgentKey.generate();
+  return { body: await sent((fetchImpl) => pickup({ url: "https://rp.example", key, version, fetchImpl }), { delegations: [] }) };
+}
+
+describe("the version this CLI reports on pairing", () => {
   it("is sent, and in the shape briefick stores", async () => {
     const body = await capture("0.5.6", "host-1");
     expect(body.version).toBe("0.5.6");
@@ -180,38 +178,41 @@ describe("the version this CLI reports on register", () => {
   });
 });
 
-describe("the session call, which is the one that sees upgrades", () => {
-  it("🔴 startSession reports the version too — register runs once per pairing", async () => {
-    // 🔴 The finding this test exists for: an upgraded CLI never re-registers, so a version
-    // recorded at register is frozen at pairing. Sessions re-issue on a short TTL.
-    const { body } = await captureSession("0.5.6");
+describe("pickup, which is the call that sees upgrades", () => {
+  it("🔴 pickup reports the version too — pairing runs once", async () => {
+    // 🔴 An upgraded CLI never re-pairs, so a version recorded at pairing is frozen there. Pickup runs every interval.
+    const { body } = await capturePickup("0.5.6");
     expect(body.version).toBe("0.5.6");
   });
 
-  it("🔴 omits it when unknown, same rule as register", async () => {
-    const { body } = await captureSession(undefined);
+  it("🔴 omits it when unknown, same rule as pairing", async () => {
+    const { body } = await capturePickup(undefined);
     expect("version" in body).toBe(false);
   });
 });
 
-describe("the wiring, not a hand-built client", () => {
-  it("🔴 agentClient() reports a version briefick will store", async () => {
-    // 🔴 This is the test the earlier ones could not be. They constructed their own client, so a
-    // call site sending `v0.5.6` stayed green in all five. This one goes through the real wiring.
-    const { agentClient } = await import("../src/cli.js");
-    const calls: Array<{ body: string }> = [];
-    const client = agentClient("https://rp.example", {
-      did: "did:jwk:x",
-      popJwt: async () => "pop",
-    } as never);
-    (client as unknown as { http: unknown }).http = async (_u: string, init: { body: string }) => {
-      calls.push(init);
-      return { ok: true, status: 200, text: async () => JSON.stringify({ registered: true }) };
-    };
-    await client.register("CODE");
-    const body = JSON.parse(calls[0].body) as { version?: string };
-    expect(body.version, "agentClient() sent no version").toBeTruthy();
-    expect(body.version).toMatch(BRIEFICK_SEMVER);
-    expect(body.version!.startsWith("v"), "a tag-shaped version is dropped by briefick").toBe(false);
+describe("the wiring, not a hand-built call", () => {
+  it("🔴 the daemon's pickup reports a version briefick will store", async () => {
+    const { pickupOptionsFor } = await import("../src/cli.js");
+    const version = pickupOptionsFor({ alias: "b", url: "https://b.example.com" }, await AgentKey.generate()).version;
+    expect(version, "pickupOptionsFor() sends no version").toBeTruthy();
+    expect(version).toMatch(BRIEFICK_SEMVER);
+  });
+
+  it("🔴 add --code pairs with a version briefick will store", async () => {
+    const { main } = await import("../src/cli.js");
+    const d = mkdtempSync(join(tmpdir(), "mpa-ver-"));
+    cleanup.push(() => rmSync(d, { recursive: true, force: true }));
+    const keyFile = join(d, "key.json");
+    const key = await AgentKey.generate();
+    saveStore(keyFile, { privateJwk: key.exportPrivateJwk() });
+    const url = "https://briefick.example.com";
+    const v = await fakeVerifier("briefick", url, () => Response.json({ paired: true, agent_fingerprint: key.fingerprint }));
+    cleanup.push(v.restore);
+    expect(await main(["add", url, "--verifier", "https://sso.example.com", "--code", "C1", "--key-file", keyFile])).toBe(0);
+    const version = v.pairs[0]?.version as string | undefined;
+    expect(version, "add sent no version").toBeTruthy();
+    expect(version).toMatch(BRIEFICK_SEMVER);
+    expect(version!.startsWith("v"), "a tag-shaped version is dropped by briefick").toBe(false);
   });
 });

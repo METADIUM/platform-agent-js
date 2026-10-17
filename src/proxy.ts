@@ -14,7 +14,7 @@ import http from "node:http";
 import https from "node:https";
 import { URL } from "node:url";
 
-/** bearer()만 제공하면 됨 — AgentAuth를 그대로 넘기거나 테스트용 스텁 가능. */
+/** bearer()만 제공하면 됨 — 테스트용 스텁 가능. */
 export interface BearerSource {
   bearer(): string;
 }

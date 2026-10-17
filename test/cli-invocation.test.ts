@@ -43,7 +43,7 @@ describe("도움말은 파서가 아는 옵션을 모두 말한다", () => {
   const flags = [...parse.matchAll(/a === "(--?[a-z-]+)"/g)].map((m) => m[1]);
 
   it("대조군 — 파서에서 옵션을 읽어 냈다", () => {
-    expect(flags).toEqual(expect.arrayContaining(["--url", "--verifier", "--insecure-no-token", "-h"]));
+    expect(flags).toEqual(expect.arrayContaining(["--url", "--verifier", "--force", "-h"]));
   });
 
   it.each(flags)("%s", (flag) => {

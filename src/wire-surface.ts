@@ -1,12 +1,11 @@
 /**
  * What this CLI puts on the wire, declared — so a change to it cannot be silent.
  *
- * `package.json`'s `agentCompat` names the class of a release; {@link WIRE_SURFACE} lists the fields
- * actually sent, and `wire-surface.test.ts` drives the real client through an injected `fetch` and
- * compares, so the declaration cannot drift from the code without a red test.
+ * `package.json`'s `agentCompat` names the class of a release; {@link WIRE_SURFACE} lists the requests
+ * and fields actually sent, and `wire-surface.test.ts` drives the real calls through an injected `fetch`
+ * and compares, so the declaration cannot drift from the code without a red test.
  *
- * Why the classes are these four, what they do not cover, and why mini-paas needs its own entry:
- * `platform-docs/43-agent-cli-wire-compatibility.md`.
+ * Why the classes are these four and what they do not cover: `platform-docs/43-agent-cli-wire-compatibility.md`.
  */
 
 /**
@@ -31,18 +30,36 @@ export const AGENT_COMPAT: Readonly<
 
 export const AGENT_COMPAT_CLASSES: readonly AgentCompat[] = Object.keys(AGENT_COMPAT) as AgentCompat[];
 
+/** One request this CLI sends: its method, its JSON body's field names (null: no body), and the headers it sets. */
+export interface WireRequest {
+  readonly method: "GET" | "POST" | "forwarded";
+  /** Sorted. `"forwarded"`: the MCP client's method or body, passed through unread. */
+  readonly body: readonly string[] | null | "forwarded";
+  /** Sorted, lower case; only headers this CLI sets itself. */
+  readonly headers: readonly string[];
+}
+
 /**
- * Field names this CLI sends, per request. Sorted, so the comparison is order-independent.
+ * Every request this CLI sends under agent-delegation `/1`, as its receiver (verifier or RP) sees it. The same
+ * shape goes to every RP: the paths come from the verifier's signed entry, the fields don't vary.
  *
- * Changing this list is not a formality — it is the declaration that a wire change happened.
- * Update it **and** set `agentCompat` in the same commit.
- *
- * ⚠️ These are the requests as **briefick** receives them. mini-paas speaks a different shape and
- * is not covered by any row here; a second RP gets its own entry rather than being folded in.
+ * Changing this table is not a formality — it is the declaration that a wire change happened.
+ * Update it **and** set `agentCompat` in the same commit. v0 (`register`/`retrieve`/`session/*`) was removed
+ * on 2026-10-17 and has no rows.
  */
-export const WIRE_SURFACE: Readonly<Record<string, readonly string[]>> = {
-  register: ["code", "didJwk", "label", "pop", "version"],
-  retrieve: ["didJwk", "pop"],
-  sessionStart: ["didJwk", "pop", "version"],
-  sessionComplete: ["didJwk", "pop", "state"],
+export const WIRE_SURFACE: Readonly<Record<string, WireRequest>> = {
+  /** `GET <verifier>/rp/<alias>` (§17): the RP's signed registry entry. */
+  rpEntry: { method: "GET", body: null, headers: [] },
+  /** The verifier's did.json, to check that entry's signature. */
+  verifierDidJson: { method: "GET", body: null, headers: [] },
+  /** `POST <resource><pairing>` (§7). `label` and `version` only when known. */
+  pairing: { method: "POST", body: ["code", "label", "version"], headers: ["agent-proof", "content-type"] },
+  /** `POST <resource><pickup>` (§8). `version` only when known. */
+  pickup: { method: "POST", body: ["version"], headers: ["agent-proof", "content-type"] },
+  /** `POST <verifier>/agent/nonce` (§9). */
+  sessionNonce: { method: "POST", body: null, headers: [] },
+  /** `POST <verifier>/agent/token` (§9). */
+  sessionToken: { method: "POST", body: ["rp", "vp_token"], headers: ["agent-proof", "content-type"] },
+  /** A forwarded MCP call to the RP (§10). */
+  mcpCall: { method: "forwarded", body: "forwarded", headers: ["agent-proof", "authorization"] },
 };

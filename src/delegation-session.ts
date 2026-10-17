@@ -1,7 +1,6 @@
 /**
  * The `/1` call path (spec agent-delegation §9.1, §10, §11): a session token from the verifier, kept fresh, and a
- * request proof on every forwarded call. The daemon uses it for a target whose RP serves `/1`; v0 targets keep their
- * bearer.
+ * request proof on every forwarded call. The daemon uses it for every RP route.
  */
 import type { ConstraintRefusalAction } from "./constraint-refusal.js";
 import type { AgentKey } from "./key.js";
