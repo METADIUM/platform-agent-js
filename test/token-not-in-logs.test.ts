@@ -55,3 +55,36 @@ describe("every unit install tightens the log first", () => {
     }
   });
 });
+
+describe("no command prints the token in clear off a terminal (metapass-saas on #65)", () => {
+  it("🔴 status and rotate-token, run without a TTY (as an AI agent or a pipe does), print a file reference", async () => {
+    const { main } = await import("../src/cli.js");
+    const { saveConfig } = await import("../src/config.js");
+    const { vi } = await import("vitest");
+    const dir = tmp();
+    const keyFile = join(dir, "key.json");
+    saveConfig(dir, { rps: [{ alias: "minipaas", url: "https://m.example.com/api", verifierUrl: "https://sso.example.com" }] });
+    const out: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void out.push(a.join(" ")));
+    try {
+      expect(await main(["rotate-token", "--key-file", keyFile])).toBe(0);
+      const token = (await import("node:fs")).readFileSync(tokenFile(dir), "utf8").trim();
+      expect(await main(["status", "--port", "1", "--key-file", keyFile])).toBe(0);
+      const all = out.join("\n");
+      expect(all, "a command printed the clear token off a terminal").not.toContain(token);
+      expect(all).toContain(`Bearer ${tokenRef(dir)}`);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("every claude mcp add line in the CLI takes the shown token, never the raw one", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
+    const calls = [...src.matchAll(/mcpAdd(?:Route)?Command\(([^;]*?)\)(?=[`}])/g)].map((m) => m[1]);
+    expect(calls.length, "no call found: the check reads nothing").toBeGreaterThan(0);
+    for (const args of calls) {
+      expect(args, `a registration line is built from the raw token: mcpAddCommand(${args})`).not.toMatch(/,\s*token\s*[,)]|,\s*token$/);
+    }
+  });
+});

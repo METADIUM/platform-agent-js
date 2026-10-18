@@ -583,11 +583,19 @@ export function invocation(sea: boolean = isSeaBinary(), execPath: string = proc
 }
 
 /**
+ * The token as printed: in clear only on a terminal. Anything else (a service log, the journal, a pipe, an AI agent's
+ * transcript) gets a reference to the 0600 file, which the printed command reads when it runs (metapass-saas).
+ */
+export function shownToken(token: string, dir: string, tty: boolean): string {
+  return tty ? token : tokenRef(dir);
+}
+
+/**
  * What `up` prints for Claude Code registration. Under a service (launchd/systemd) stderr is a log file or the
  * journal, so the token is printed as a reference to its 0600 file, never in clear (metapass-saas, 2026-10-18).
  */
 export function upRegistrationLines(cfg: { rps: DaemonRp[] }, port: number, token: string, dir: string, tty: boolean): string[] {
-  const shown = tty ? token : tokenRef(dir);
+  const shown = shownToken(token, dir, tty);
   return [
     `\nClaude Code 등록(복사-실행):`,
     ...cfg.rps.map((rp) => `  ${mcpAddCommand(rp.alias, port, shown, cfg.rps.length === 1)}`),
@@ -946,7 +954,7 @@ export async function main(argv: string[]): Promise<number> {
     const port = cfg.port ?? 8787;
     console.log(`✅ RP 추가: ${alias} → ${url}\n  지문: ${key.fingerprint}`);
     console.log(`\nClaude Code 등록(복사-실행):`);
-    console.log(`  ${mcpAddCommand(alias, port, token, cfg.rps.length === 1)}`);
+    console.log(`  ${mcpAddCommand(alias, port, shownToken(token, dir, Boolean(process.stdout.isTTY)), cfg.rps.length === 1)}`);
     if (cfg.rps.length > 1) {
       console.log(`\n⚠ RP가 ${cfg.rps.length}개 — 루트 /mcp 등록이 있었다면 경로형으로 재등록하세요(status가 전체 명령 출력)`);
     }
@@ -980,7 +988,7 @@ export async function main(argv: string[]): Promise<number> {
     console.log("✅ 로컬 토큰 회전 완료");
     console.log("⚠ 토큰은 데몬당 1개 — 지금 즉시 **모든 RP의 Claude Code 등록이 401**입니다. 아래로 전부 재등록하세요:");
     for (const rp of cfg.rps) {
-      console.log(`  claude mcp remove ${rp.alias}; ${mcpAddCommand(rp.alias, cfg.port ?? 8787, token, cfg.rps.length === 1)}`);
+      console.log(`  claude mcp remove ${rp.alias}; ${mcpAddCommand(rp.alias, cfg.port ?? 8787, shownToken(token, dir, Boolean(process.stdout.isTTY)), cfg.rps.length === 1)}`);
     }
     return 0;
   }
@@ -1027,7 +1035,7 @@ export async function main(argv: string[]): Promise<number> {
         console.log(`  ${rp.alias.padEnd(10)} ${delegationLine(data?.credentials?.[rp.url], data?.held?.[rp.url])}`);
         const sess = sessionLine(live);
         if (sess) console.log(`  ${"".padEnd(10)} ${sess}`);
-        console.log(`  ${"".padEnd(10)} ${mcpAddCommand(rp.alias, port, token, cfg.rps.length === 1)}`);
+        console.log(`  ${"".padEnd(10)} ${mcpAddCommand(rp.alias, port, shownToken(token, dir, Boolean(process.stdout.isTTY)), cfg.rps.length === 1)}`);
         continue;
       }
       // §15: one line per route; with several, each needs its own MCP registration.
@@ -1037,8 +1045,9 @@ export async function main(argv: string[]): Promise<number> {
         console.log(`  ${name.padEnd(10)} ${delegationLine(cred, data?.held?.[slotKey(rp.url, route)])}`);
         const sess = sessionLine(live?.routes?.find((r) => r.route === route));
         if (sess) console.log(`  ${"".padEnd(10)} ${sess}`);
-        console.log(`  ${"".padEnd(10)} ${single ? mcpAddCommand(rp.alias, port, token, cfg.rps.length === 1)
-          : mcpAddRouteCommand(rp.alias, route, port, token)}`);
+        const shown = shownToken(token, dir, Boolean(process.stdout.isTTY));
+        console.log(`  ${"".padEnd(10)} ${single ? mcpAddCommand(rp.alias, port, shown, cfg.rps.length === 1)
+          : mcpAddRouteCommand(rp.alias, route, port, shown)}`);
       }
     }
     return 0;
