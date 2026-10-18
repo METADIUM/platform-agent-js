@@ -22,7 +22,7 @@ import { DEFAULT_POLL_INTERVAL_S, isNewer, latest, pickup, pickupMessage, type P
 import { defaultRoute, routeFor, sanitizeRoute, slotKey, slotsOf, vcScope } from "./routes.js";
 import { defaultKeyFile, KeyStoreUnreadable, loadStore, openStore, type AgentStore, type DroppedVc, type HeldCredential, type KeyStore } from "./keystore.js";
 import {
-  aliasFromUrl, configDir, DEFAULT_RP_PATHS, ensureToken, loadConfig, mcpAddCommand, mcpAddRouteCommand, rotateToken, saveConfig,
+  aliasFromUrl, configDir, DEFAULT_RP_PATHS, ensureToken, loadConfig, mcpAddCommand, mcpAddRouteCommand, rotateToken, saveConfig, tokenRef, prepareLogFile,
   type DaemonConfig, type DaemonRp,
 } from "./config.js";
 import { startDaemon, type DaemonTarget } from "./daemon.js";
@@ -582,6 +582,19 @@ export function invocation(sea: boolean = isSeaBinary(), execPath: string = proc
   return sea ? execPath : "npx @metadium-did/platform-agent-js";
 }
 
+/**
+ * What `up` prints for Claude Code registration. Under a service (launchd/systemd) stderr is a log file or the
+ * journal, so the token is printed as a reference to its 0600 file, never in clear (metapass-saas, 2026-10-18).
+ */
+export function upRegistrationLines(cfg: { rps: DaemonRp[] }, port: number, token: string, dir: string, tty: boolean): string[] {
+  const shown = tty ? token : tokenRef(dir);
+  return [
+    `\nClaude Code 등록(복사-실행):`,
+    ...cfg.rps.map((rp) => `  ${mcpAddCommand(rp.alias, port, shown, cfg.rps.length === 1)}`),
+    ...(tty ? [] : ["  (the token isn't written to this log: the command reads it from the 0600 proxy-token file)"]),
+  ];
+}
+
 /** When v0 was removed from every RP (spec §20) and from this CLI. */
 export const V0_REMOVED_ON = "2026-10-17";
 
@@ -1077,6 +1090,7 @@ export async function main(argv: string[]): Promise<number> {
 
     // 실행 라인이 바뀌었을 수 있으므로 유닛 재설치 = 새 바이너리로 재기동
     const dir0 = configDir(args.keyFile);
+    prepareLogFile(join(dir0, "daemon.log"));
     const r = installUnit(join(dir0, "daemon.log"));
     console.log(`✅ 유닛 재설치·재시작(${r.kind}): ${r.unitPath}`);
     for (const n of r.notes) console.log("  " + n);
@@ -1098,6 +1112,7 @@ export async function main(argv: string[]): Promise<number> {
     const cfg = loadConfig(dir);
     if (cfg.rps.length === 0) return fail("등록된 RP 없음 — 먼저 add <RP_URL> --verifier <검증자 URL> --code <CODE>");
     ensureToken(dir); // 유닛 기동 전에 토큰·권한 선검증(fail-closed를 설치 시점에 노출)
+    prepareLogFile(join(dir, "daemon.log"));
     const r = installUnit(join(dir, "daemon.log"));
     console.log(`✅ OS 데몬 설치·시작(${r.kind}): ${r.unitPath}`);
     for (const n of r.notes) console.log("  " + n);
@@ -1131,10 +1146,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     console.error(`✅ 에이전트 데몬 실행: 127.0.0.1:${daemon.port} (RP ${targets.length}개, 로컬 토큰 필수)`);
     console.error(`   에이전트 지문: ${key.fingerprint}`);
-    console.error(`\nClaude Code 등록(복사-실행):`);
-    for (const rp of cfg.rps) {
-      console.error(`  ${mcpAddCommand(rp.alias, daemon.port, token, cfg.rps.length === 1)}`);
-    }
+    for (const line of upRegistrationLines(cfg, daemon.port, token, dir, Boolean(process.stderr.isTTY))) console.error(line);
     console.error("\n(Ctrl+C 로 종료 · 상태는 다른 터미널에서 `status`)");
     const stop = async () => {
       await daemon.close();
