@@ -63,6 +63,7 @@ describe("up wires the per-request token", () => {
     const src = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
     const calls = [...src.matchAll(/startDaemon\(\{([^}]*)\}\)/g)].map((m) => m[1]);
     expect(calls.length, "no startDaemon call found: the check reads nothing").toBeGreaterThan(0);
-    for (const c of calls) expect(c, `startDaemon({${c}}) snapshots the token: a rotation won't revoke it`).toMatch(/token:\s*\(\)\s*=>/);
+    // The function must read the file, not close over a value read once (metapass-saas on #66: `() => t0` passed the shape check).
+    for (const c of calls) expect(c, `startDaemon({${c}}) doesn't read the token file per request: a rotation won't revoke it`).toMatch(/token:\s*\(\)\s*=>\s*readToken\(/);
   });
 });
