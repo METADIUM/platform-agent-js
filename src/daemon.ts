@@ -37,8 +37,11 @@ export interface DaemonTarget {
 
 export interface DaemonOptions {
   targets: DaemonTarget[];
-  /** 로컬 인증 토큰(필수) — proxy-token 파일 값. */
-  token: string;
+  /**
+   * 로컬 인증 토큰(필수) — proxy-token 파일 값. A function is read on every request, so `rotate-token` revokes the
+   * old token at once without a restart (metapass-saas, 2026-10-18); if it throws, the request is refused.
+   */
+  token: string | (() => string);
   /** 미지정 시 8787부터 빈 포트 자동 배정. */
   port?: number;
   host?: string;
@@ -104,7 +107,13 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
       // 무토큰 — "데몬 다운(ConnectionRefused)" vs "인증 실패(401)" 구분용. 정보 없음.
       return json(cres, 200, { status: "up" });
     }
-    if (!tokenOk(opts.token, creq.headers.authorization)) {
+    let expected: string;
+    try {
+      expected = typeof opts.token === "function" ? opts.token() : opts.token;
+    } catch {
+      expected = "";   // unreadable or loosened token file: fail closed
+    }
+    if (!expected || !tokenOk(expected, creq.headers.authorization)) {
       return drainAnd(creq, () => json(cres, 401, { error: "unauthorized", hint: "proxy-token 필요 — `status`가 등록 명령을 출력합니다" }));
     }
 

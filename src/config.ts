@@ -91,6 +91,13 @@ export function ensureToken(dir: string): string {
   return token;
 }
 
+/** The token as the file holds it now, read-only: throws if it's missing or not owner-only (the daemon refuses then). */
+export function readToken(dir: string): string {
+  const path = tokenFile(dir);
+  assertOwnerOnly(path);
+  return readFileSync(path, "utf8").trim();
+}
+
 /** 토큰 회전 — 새 토큰 저장 후 반환. ⚠ 데몬당 1개라 회전 즉시 전 RP의 MCP 등록이 401. */
 export function rotateToken(dir: string): string {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
