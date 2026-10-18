@@ -8,7 +8,7 @@
  *   **비밀은 argv·유닛 env에 싣지 않는다** — 항상 이 파일에서 런타임에 읽는다.
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface DaemonRp {
@@ -91,12 +91,22 @@ export function ensureToken(dir: string): string {
   return token;
 }
 
+/** The token as the file holds it now, read-only: throws if it's missing or not owner-only (the daemon refuses then). */
+export function readToken(dir: string): string {
+  const path = tokenFile(dir);
+  assertOwnerOnly(path);
+  return readFileSync(path, "utf8").trim();
+}
+
 /** 토큰 회전 — 새 토큰 저장 후 반환. ⚠ 데몬당 1개라 회전 즉시 전 RP의 MCP 등록이 401. */
 export function rotateToken(dir: string): string {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const token = randomBytes(32).toString("base64url");
-  writeFileSync(tokenFile(dir), token + "\n", { mode: 0o600 });
-  chmodSync(tokenFile(dir), 0o600);
+  // Written beside it and renamed over it: the daemon reads the file per request, so it must never see it half-written.
+  const tmp = `${tokenFile(dir)}.${process.pid}.tmp`;
+  writeFileSync(tmp, token + "\n", { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, tokenFile(dir));
   return token;
 }
 

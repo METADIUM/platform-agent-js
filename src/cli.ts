@@ -22,7 +22,7 @@ import { DEFAULT_POLL_INTERVAL_S, isNewer, latest, pickup, pickupMessage, type P
 import { defaultRoute, routeFor, sanitizeRoute, slotKey, slotsOf, vcScope } from "./routes.js";
 import { defaultKeyFile, KeyStoreUnreadable, loadStore, openStore, type AgentStore, type DroppedVc, type HeldCredential, type KeyStore } from "./keystore.js";
 import {
-  aliasFromUrl, configDir, DEFAULT_RP_PATHS, ensureToken, loadConfig, mcpAddCommand, mcpAddRouteCommand, rotateToken, saveConfig, tokenRef, prepareLogFile,
+  aliasFromUrl, configDir, DEFAULT_RP_PATHS, ensureToken, loadConfig, mcpAddCommand, mcpAddRouteCommand, rotateToken, saveConfig, tokenRef, prepareLogFile, readToken,
   type DaemonConfig, type DaemonRp,
 } from "./config.js";
 import { startDaemon, type DaemonTarget } from "./daemon.js";
@@ -1146,7 +1146,8 @@ export async function main(argv: string[]): Promise<number> {
     //       **같은 판 안에서** 나는 침묵이라 더 나쁘다. 게다가 `up` 이 권장 명령이다.
     //    📌 HELP 가 `--port` 를 「proxy 리슨 포트」로만 적어 뒀는데, `up` 설명은
     //       `127.0.0.1:<port>/…` 를 말한다 — **문서가 서로 어긋났다.** 둘 다 고친다.
-    const daemon = await startDaemon({ targets, token, port: args.port ?? cfg.port });
+    // The file, read per request: a rotation revokes the old token without a restart.
+    const daemon = await startDaemon({ targets, token: () => readToken(dir), port: args.port ?? cfg.port });
     // ⚠️ 명시한 `--port` 는 **이번 실행만** — 저장은 종전처럼 «자동 배정된 포트 고정» 일 때만.
     //    안 그러면 한 번의 `--port` 가 이후 기동을 **영구히** 바꾼다.
     if (args.port == null && cfg.port !== daemon.port) {
