@@ -42,6 +42,21 @@ describe("rotate-token revokes the old token without a restart (metapass-saas, 2
   });
 });
 
+describe("rotate-token replaces the file atomically (minipaas on #66)", () => {
+  it("🔴 the token file is never seen empty or half-written: it's renamed into place", async () => {
+    const { readFileSync, readdirSync } = await import("node:fs");
+    const src = readFileSync(new URL("../src/config.ts", import.meta.url), "utf8");
+    const body = src.slice(src.indexOf("export function rotateToken"), src.indexOf("\n}\n", src.indexOf("export function rotateToken")));
+    expect(body, "rotateToken writes the live file in place: a request in between reads it empty").not.toMatch(/writeFileSync\(tokenFile\(dir\)/);
+    expect(body).toMatch(/renameSync\(tmp, tokenFile\(dir\)\)/);
+    const dir = mkdtempSync(join(tmpdir(), "mpa-rot-"));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const t = rotateToken(dir);
+    expect(readToken(dir)).toBe(t);
+    expect(readdirSync(dir).filter((f) => f.endsWith(".tmp")), "a temp file was left behind").toEqual([]);
+  });
+});
+
 describe("up wires the per-request token", () => {
   it("🔴 the CLI's startDaemon gets a token function, not a value read once at start", async () => {
     const { readFileSync } = await import("node:fs");

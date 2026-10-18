@@ -8,7 +8,7 @@
  *   **비밀은 argv·유닛 env에 싣지 않는다** — 항상 이 파일에서 런타임에 읽는다.
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface DaemonRp {
@@ -102,8 +102,11 @@ export function readToken(dir: string): string {
 export function rotateToken(dir: string): string {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const token = randomBytes(32).toString("base64url");
-  writeFileSync(tokenFile(dir), token + "\n", { mode: 0o600 });
-  chmodSync(tokenFile(dir), 0o600);
+  // Written beside it and renamed over it: the daemon reads the file per request, so it must never see it half-written.
+  const tmp = `${tokenFile(dir)}.${process.pid}.tmp`;
+  writeFileSync(tmp, token + "\n", { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, tokenFile(dir));
   return token;
 }
 
