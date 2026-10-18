@@ -8,7 +8,7 @@
  *   **비밀은 argv·유닛 env에 싣지 않는다** — 항상 이 파일에서 런타임에 읽는다.
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface DaemonRp {
@@ -42,8 +42,19 @@ function configFile(dir: string): string {
   return join(dir, "agent.json");
 }
 
-function tokenFile(dir: string): string {
+export function tokenFile(dir: string): string {
   return join(dir, "proxy-token");
+}
+
+/** The daemon's log may carry what a service prints: owner-only, created or tightened before the unit starts. */
+export function prepareLogFile(path: string): void {
+  closeSync(openSync(path, "a", 0o600));
+  chmodSync(path, 0o600);
+}
+
+/** The token as a shell reference to its 0600 file, for output that lands in a log (a service's stdout). */
+export function tokenRef(dir: string): string {
+  return `$(cat '${tokenFile(dir).replace(/'/g, "'\\''")}')`;
 }
 
 export function loadConfig(dir: string): DaemonConfig {

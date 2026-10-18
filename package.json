@@ -1,7 +1,7 @@
 {
   "name": "@metadium-did/platform-agent-js",
-  "version": "0.11.0",
-  "agentCompat": "breaking",
+  "version": "0.11.1",
+  "agentCompat": "local",
   "description": "METADIUM AI-agent holder client + CLI — did:jwk key, SD-JWT VC presentation (KB-JWT), and the agent-delegation /1 flow (pairing, pickup, session exchange, signed calls). Node/TS (ES256/P-256 only), wire-compatible with platform-java.",
   "type": "module",
   "main": "dist/index.js",
