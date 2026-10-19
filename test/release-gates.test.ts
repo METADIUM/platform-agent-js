@@ -61,14 +61,14 @@ describe("workflow run blocks parse as bash", () => {
 
 describe("release-compat-gate.mjs", () => {
   /** A repo-shaped temp dir: scripts/, dist/wire-surface.js, package.json, and a fake `gh`. */
-  function layout(agentCompat: string, releaseBody: string) {
+  function layout(agentCompat: string, releaseBody: string, receivers: unknown = ["briefick", "minipaas"]) {
     const root = mkdtempSync(join(tmpdir(), "gate-"));
     mkdirSync(join(root, "scripts"));
     mkdirSync(join(root, "dist"));
     mkdirSync(join(root, "bin"));
     cpSync("scripts/release-compat-gate.mjs", join(root, "scripts/release-compat-gate.mjs"));
     writeFileSync(join(root, "dist/wire-surface.js"), `export const AGENT_COMPAT = ${JSON.stringify(AGENT_COMPAT)};\n`);
-    writeFileSync(join(root, "package.json"), JSON.stringify({ agentCompat }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ agentCompat, agentCompatReceivers: receivers }));
     writeFileSync(join(root, "body.txt"), releaseBody);
     writeFileSync(join(root, "bin/gh"), `#!/bin/sh\ncat "${join(root, "body.txt")}"\n`);
     chmodSync(join(root, "bin/gh"), 0o755);
@@ -92,7 +92,19 @@ describe("release-compat-gate.mjs", () => {
 
   it("receiver-first needs a receiver-confirmed line in the release notes", () => {
     expect(layout("receiver-first", "notes without it")().status).toBe(1);
-    const ok = layout("receiver-first", "- receiver-confirmed: briefick 30cf66f on 2026-10-01\n")();
+    const ok = layout("receiver-first",
+      "- receiver-confirmed: briefick 30cf66f on 2026-10-01\n- receiver-confirmed: minipaas bcacba3 on 2026-10-17\n")();
     expect(ok.status, ok.stderr).toBe(0);
+  });
+
+  it("🔴 every listed receiver needs its own line: one RP's line no longer passes for all (metapass-saas, N17)", () => {
+    const r = layout("breaking", "- receiver-confirmed: briefick 952096f on 2026-10-17\n")();
+    expect(r.status, "a breaking release passed with only briefick confirmed").toBe(1);
+    expect(r.stderr).toContain("minipaas");
+  });
+
+  it("a release that needs receivers fails without the list, rather than checking nobody", () => {
+    expect(layout("breaking", "- receiver-confirmed: briefick 952096f on 2026-10-17\n", undefined)().status).toBe(1);
+    expect(layout("breaking", "- receiver-confirmed: briefick 952096f on 2026-10-17\n", [])().status).toBe(1);
   });
 });

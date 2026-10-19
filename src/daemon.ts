@@ -99,6 +99,8 @@ function view(t: DaemonTarget): { alias: string; connected: boolean; pendingReas
 export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
   const host = opts.host ?? "127.0.0.1";
   const audit = opts.audit ?? ((line: string) => console.error(line));
+  // Fail-closed must not be silent: say once why every request is refused, and again only if the reason changes (Briefick).
+  let tokenProblem = "";
   const byAlias = new Map(opts.targets.map((t) => [t.alias, t]));
 
   const server = http.createServer((creq, cres) => {
@@ -110,8 +112,12 @@ export function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
     let expected: string;
     try {
       expected = typeof opts.token === "function" ? opts.token() : opts.token;
-    } catch {
+      tokenProblem = "";
+    } catch (e) {
       expected = "";   // unreadable or loosened token file: fail closed
+      const why = e instanceof Error ? e.message : String(e);
+      if (why !== tokenProblem) audit(`⚠ proxy-token unusable, refusing every request until fixed: ${why}`);
+      tokenProblem = why;
     }
     if (!expected || !tokenOk(expected, creq.headers.authorization)) {
       return drainAnd(creq, () => json(cres, 401, { error: "unauthorized", hint: "proxy-token 필요 — `status`가 등록 명령을 출력합니다" }));

@@ -25,13 +25,16 @@ function rowOf(url: string): string {
   return routes[url] ?? `undeclared ${url}`;
 }
 
-function shape(init: RequestInit | undefined): WireRequest {
+/** The receiver class is the host the request actually went to: the verifier's or the RP's. */
+const receiverOf = (url: string): WireRequest["receiver"] => (new URL(url).origin === new URL(VERIFIER).origin ? "verifier" : "rp");
+
+function shape(init: RequestInit | undefined, url: string): WireRequest {
   const raw = init?.body;
   const body = raw === undefined || raw === null
     ? null
     : Object.keys(JSON.parse(Buffer.from(raw as Uint8Array).toString("utf8")) as object).sort();
   const headers = Object.keys((init?.headers ?? {}) as Record<string, string>).map((h) => h.toLowerCase()).sort();
-  return { method: (init?.method ?? "GET") as WireRequest["method"], body, headers };
+  return { receiver: receiverOf(url), method: (init?.method ?? "GET") as WireRequest["method"], body, headers };
 }
 
 /** Drives every `/1` request this CLI sends through one recording `fetch`; returns what each receiver saw. */
@@ -56,7 +59,7 @@ async function drive(opts: { label?: string; version?: string }): Promise<Record
   const seen: Record<string, WireRequest> = {};
   const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
     const row = rowOf(String(url));
-    seen[row] = shape(init);
+    seen[row] = shape(init, String(url));
     return (replies[row] ?? (() => new Response("", { status: 404 })))();
   }) as typeof fetch;
 
@@ -72,7 +75,7 @@ async function drive(opts: { label?: string; version?: string }): Promise<Record
   await auth.start();
   const headers = await auth.callHeaders("POST", RP + "/mcp", Buffer.from("{}"));
   auth.stop();
-  seen.mcpCall = { method: "forwarded", body: "forwarded", headers: Object.keys(headers).map((h) => h.toLowerCase()).sort() };
+  seen.mcpCall = { receiver: receiverOf(RP + "/mcp"), method: "forwarded", body: "forwarded", headers: Object.keys(headers).map((h) => h.toLowerCase()).sort() };
   return seen;
 }
 
@@ -107,6 +110,17 @@ describe("the wire surface this release declares", () => {
       .toEqual(Object.keys(WIRE_SURFACE).sort());
     for (const [row, declared] of Object.entries(WIRE_SURFACE)) {
       expect(seen[row], `${row} moved`).toEqual(declared);
+    }
+  });
+
+  it("🔴 every receiver of a declared request is a release-gate receiver (metapass-saas on #67)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { RECEIVERS_BY_CLASS } = await import("../src/wire-surface.js");
+    const listed: string[] = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).agentCompatReceivers ?? [];
+    for (const [row, req] of Object.entries(WIRE_SURFACE)) {
+      for (const name of RECEIVERS_BY_CLASS[req.receiver]) {
+        expect(listed, `${row} is received by the ${req.receiver} '${name}', which the release gate doesn't require a line for`).toContain(name);
+      }
     }
   });
 

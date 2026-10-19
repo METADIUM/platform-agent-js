@@ -42,6 +42,24 @@ describe("rotate-token revokes the old token without a restart (metapass-saas, 2
   });
 });
 
+describe("a refusing daemon says why, once (Briefick on #66)", () => {
+  it("🔴 a loosened token file is logged with its chmod hint, once, not per request", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mpa-rot-"));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const token = ensureToken(dir);
+    const lines: string[] = [];
+    const d = await startDaemon({ targets: [{ alias: "rp", targetMcpUrl: "http://127.0.0.1:9/mcp", auth: null, pendingReason: "waiting" }],
+      token: () => readToken(dir), port: 0, audit: (l) => lines.push(l) });
+    cleanup.push(() => d.close());
+    chmodSync(join(dir, "proxy-token"), 0o644);
+    expect(await call(d, token)).toBe(401);
+    expect(await call(d, token)).toBe(401);
+    const said = lines.filter((l) => l.includes("proxy-token unusable"));
+    expect(said.length, "the refusal reason wasn't logged once").toBe(1);
+    expect(said[0]).toContain("chmod 600");
+  });
+});
+
 describe("rotate-token replaces the file atomically (minipaas on #66)", () => {
   it("🔴 the token file is never seen empty or half-written: it's renamed into place", async () => {
     const { readFileSync, readdirSync } = await import("node:fs");
