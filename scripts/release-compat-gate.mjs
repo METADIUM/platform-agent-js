@@ -7,7 +7,8 @@
  */
 const { AGENT_COMPAT } = await import(new URL("../dist/wire-surface.js", import.meta.url).href);
 const { readFileSync } = await import("node:fs");
-const c = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).agentCompat ?? "";
+const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const c = pkg.agentCompat ?? "";
 const spec = AGENT_COMPAT[c];
 if (!spec) {
   console.error(`package.json agentCompat is missing or unknown: ${JSON.stringify(c)}`);
@@ -45,10 +46,19 @@ try {
   console.error("  Check GH_TOKEN and that the release is published, then re-publish.");
   process.exit(1);
 }
-// Requires a receiver, a commit sha and a date, so `receiver-confirmed: TODO` does not
+// Every RP in `agentCompatReceivers` needs its own line: one receiver's line used to pass for all
+// ([metapass-saas], N17). Each line needs a commit sha and a date, so `receiver-confirmed: TODO` does not
 // pass; the optional bullet accepts the markdown form ([Briefick], review of #34).
-const CONFIRMED = /^\s*(?:[-*]\s+)?receiver-confirmed:\s*\S+\s+[0-9a-f]{7,40}\s+on\s+\d{4}-\d{2}-\d{2}/mi;
-if (!CONFIRMED.test(body)) {
+const receivers = pkg.agentCompatReceivers;
+if (!Array.isArray(receivers) || receivers.length === 0) {
+  console.error("package.json agentCompatReceivers must list every RP this CLI talks to (e.g. [\"briefick\", \"minipaas\"]).");
+  process.exit(1);
+}
+const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const missing = receivers.filter((r) =>
+  !new RegExp(`^\\s*(?:[-*]\\s+)?receiver-confirmed:\\s*${esc(r)}\\s+[0-9a-f]{7,40}\\s+on\\s+\\d{4}-\\d{2}-\\d{2}`, "mi").test(body));
+if (missing.length > 0) {
+  console.error(`missing receiver-confirmed line(s) for: ${missing.join(", ")}`);
   console.error(`agentCompat = ${c} requires the receiver to be confirmed BEFORE this release.`);
   console.error("  Add a line to the release notes and RE-PUBLISH (a workflow Re-run");
   console.error("  replays the old payload; this gate re-reads live, but re-publish is safer):");
@@ -60,7 +70,7 @@ if (!CONFIRMED.test(body)) {
   console.error("  See platform-docs/43-agent-cli-wire-compatibility.md section 2.3.");
   process.exit(1);
 }
-console.log("receiver confirmation present in the release notes.");
+console.log(`receiver confirmation present for every receiver: ${receivers.join(", ")}.`);
 // What this gate did NOT check: that the class is the right one. `agentCompat` is a
 // human judgement — a replacement labelled `receiver-first` passes here with
 // `coexists: true` recorded against it falsely. Green means the declared class was
@@ -68,7 +78,7 @@ console.log("receiver confirmation present in the release notes.");
 console.log(`NOT CHECKED: that ${c} is the correct class for this change. Nothing can.`);
 console.log("NOT CHECKED: that the named commit CONTAINS the widening — confirm with");
 console.log("  `git merge-base --is-ancestor <widening> <running>` in the receiver's repo.");
-console.log("NOT CHECKED: any receiver the line does not name. Independent installs are");
+console.log("NOT CHECKED: receivers not listed in agentCompatReceivers. Independent installs are");
 console.log("  unconfirmed by construction — see platform-docs/43 section 2.3.");
 console.log("NOT CHECKED: that a confirmation HAPPENED. This gate measures that a line");
 console.log("  exists and is well-formed. The sha and date make it re-checkable by a");
