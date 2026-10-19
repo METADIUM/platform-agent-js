@@ -32,6 +32,8 @@ export const AGENT_COMPAT_CLASSES: readonly AgentCompat[] = Object.keys(AGENT_CO
 
 /** One request this CLI sends: its method, its JSON body's field names (null: no body), and the headers it sets. */
 export interface WireRequest {
+  /** Who receives it: the verifier (sso) or the RP. Every receiver must be confirmed for a release that needs it. */
+  receiver: "verifier" | "rp";
   readonly method: "GET" | "POST" | "forwarded";
   /** Sorted. `"forwarded"`: the MCP client's method or body, passed through unread. */
   readonly body: readonly string[] | null | "forwarded";
@@ -47,19 +49,25 @@ export interface WireRequest {
  * Update it **and** set `agentCompat` in the same commit. v0 (`register`/`retrieve`/`session/*`) was removed
  * on 2026-10-17 and has no rows.
  */
+/** Release-gate names per receiver class: the verifier instance, and every RP. */
+export const RECEIVERS_BY_CLASS: Readonly<Record<WireRequest["receiver"], readonly string[]>> = {
+  verifier: ["sso"],
+  rp: ["briefick", "minipaas"],
+};
+
 export const WIRE_SURFACE: Readonly<Record<string, WireRequest>> = {
   /** `GET <verifier>/rp/<alias>` (§17): the RP's signed registry entry. */
-  rpEntry: { method: "GET", body: null, headers: [] },
+  rpEntry: { receiver: "verifier", method: "GET", body: null, headers: [] },
   /** The verifier's did.json, to check that entry's signature. */
-  verifierDidJson: { method: "GET", body: null, headers: [] },
+  verifierDidJson: { receiver: "verifier", method: "GET", body: null, headers: [] },
   /** `POST <resource><pairing>` (§7). `label` and `version` only when known. */
-  pairing: { method: "POST", body: ["code", "label", "version"], headers: ["agent-proof", "content-type"] },
+  pairing: { receiver: "rp", method: "POST", body: ["code", "label", "version"], headers: ["agent-proof", "content-type"] },
   /** `POST <resource><pickup>` (§8). `version` only when known. */
-  pickup: { method: "POST", body: ["version"], headers: ["agent-proof", "content-type"] },
+  pickup: { receiver: "rp", method: "POST", body: ["version"], headers: ["agent-proof", "content-type"] },
   /** `POST <verifier>/agent/nonce` (§9). */
-  sessionNonce: { method: "POST", body: null, headers: [] },
+  sessionNonce: { receiver: "verifier", method: "POST", body: null, headers: [] },
   /** `POST <verifier>/agent/token` (§9). */
-  sessionToken: { method: "POST", body: ["rp", "vp_token"], headers: ["agent-proof", "content-type"] },
+  sessionToken: { receiver: "verifier", method: "POST", body: ["rp", "vp_token"], headers: ["agent-proof", "content-type"] },
   /** A forwarded MCP call to the RP (§10). */
-  mcpCall: { method: "forwarded", body: "forwarded", headers: ["agent-proof", "authorization"] },
+  mcpCall: { receiver: "rp", method: "forwarded", body: "forwarded", headers: ["agent-proof", "authorization"] },
 };

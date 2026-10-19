@@ -3,6 +3,7 @@
   "version": "0.11.3",
   "agentCompat": "local",
   "agentCompatReceivers": [
+    "sso",
     "briefick",
     "minipaas"
   ],
