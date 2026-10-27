@@ -50,15 +50,17 @@ v8.startupSnapshot.setDeserializeMainFunction(print);`
   if (darwin) run("codesign", ["-s", "-", bin]);
 
   const outs = Array.from({ length: RUNS }, () => JSON.parse(execFileSync(bin, { encoding: "utf8" })));
-  console.log(`node ${process.version} · options ${JSON.stringify(options)}`);
+  const label = process.env.SEA_OPTIONS_OVERRIDE ? "CONTROL (not the release options)" : "release options";
+  console.log(`node ${process.version} · ${label} ${JSON.stringify(options)}`);
   for (const o of outs) console.log(`  ${JSON.stringify(o)}`);
   const repeated = ["randomUUID", "randomInt"].filter((k) => new Set(outs.map((o) => o[k])).size < RUNS);
   if (repeated.length > 0) {
     console.error(`🔴 ${repeated.join(", ")} repeated across runs of one SEA (CVE-2026-106074).`);
     console.error("   Build with a Node that fixes it (22.23.4+), or stop calling these before the snapshot.");
-    process.exit(1);
+    process.exitCode = 1; // not exit(): the finally below must still remove the probe
+  } else {
+    console.log(`🟢 ${RUNS} runs of one SEA gave ${RUNS} different randomUUID and randomInt values.`);
   }
-  console.log(`🟢 ${RUNS} runs of one SEA gave ${RUNS} different randomUUID and randomInt values.`);
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

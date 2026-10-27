@@ -18,8 +18,15 @@ jobs:
       - run: npm run build
       - run: node scripts/build-sea.mjs --all
       # CVE-2026-106074: a SEA can repeat randomUUID()/randomInt() on every run (key.ts takes jti
-      # from randomUUID). Builds a probe SEA with this node and build-sea's options; red on repeat.
+      # from randomUUID). Builds a probe SEA with this node; red on repeat.
+      # First run: the release options (catches a change that turns the snapshot on). Second run:
+      # a snapshot that calls both before it is taken - repeats on 22.23.2, so green means this
+      # node carries the fix.
       - run: node scripts/check-sea-entropy.mjs
+      - run: node scripts/check-sea-entropy.mjs
+        env:
+          SEA_OPTIONS_OVERRIDE: '{"useSnapshot":true}'
+          SEA_SNAPSHOT_WARMUP: "1"
       # 🔴 **바이너리가 자기 판을 말하는지 여기서 잠근다.** v0.5.1 바이너리는 `--version` 이
       #    exit 1 로 «판을 읽지 못했다» 를 냈는데(SEA 에는 package.json 이 없다) 릴리스가
       #    그대로 나갔다 — 아무도 **자산을 받아 돌려 보지 않았기** 때문이다.
@@ -127,6 +134,10 @@ jobs:
             esac
             n=$(strings -a "$bin" | grep -cF -- "\"$expected\"" || true)
             if [ "$n" -lt 1 ]; then echo "🔴 $t: 판 '$expected' 이 번들에 안 박혔다"; fail=1; fi
+            # The embedded Node is the one .nvmrc names (0.11.3 binaries carried v22.23.2).
+            nodev="v$(cat .nvmrc)"
+            if ! strings -a "$bin" | grep -qxF -- "$nodev"; then
+              echo "🔴 $t: embedded Node is not $nodev"; fail=1; fi
             if ! grep -q "  metapass-agent-$t$" dist-bin/SHA256SUMS; then
               echo "🔴 $t: SHA256SUMS 에 없다"; fail=1; fi
           done
