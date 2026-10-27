@@ -20,16 +20,20 @@ const root = join(import.meta.dirname, "..");
 
 describe("the Node version the release is built with", () => {
   const nvmrc = readFileSync(join(root, ".nvmrc"), "utf8").trim();
-  const workflow = readFileSync(join(root, ".github/workflows/release-binaries.yml"), "utf8");
+  const wf = (f: string) => readFileSync(join(root, ".github/workflows", f), "utf8");
+  const workflow = wf("release-binaries.yml");
+  // The same binary checks on the pull request, so they do not first run after the release is public.
+  const prCheck = wf("sea-check.yml");
+  const binaryWorkflows = { "release-binaries.yml": workflow, "sea-check.yml": prCheck };
 
   it("is pinned to an exact patch version, not a floating major", () => {
     expect(nvmrc).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it("🔴 is taken from .nvmrc by the workflow, so the pin is the one that ships", () => {
-    expect(workflow).toContain("node-version-file: .nvmrc");
+  it.each(Object.entries(binaryWorkflows))("🔴 is taken from .nvmrc by %s, so the pin is the one that ships", (_, w) => {
+    expect(w).toContain("node-version-file: .nvmrc");
     // A literal `node-version:` alongside it would win or conflict depending on ordering.
-    expect(workflow).not.toMatch(/^\s*node-version:\s*\S/m);
+    expect(w).not.toMatch(/^\s*node-version:\s*\S/m);
   });
 
   // The first patch of each line that fixes the October 2026 Node security release
@@ -48,10 +52,28 @@ describe("the Node version the release is built with", () => {
     expect(atLeast(nvmrc, min), `.nvmrc ${nvmrc} predates ${min}, which the release binaries need`).toBe(true);
   });
 
-  it("🔴 the entropy probe runs in the release and measures the options build-sea ships", () => {
-    expect(workflow).toMatch(/^\s*- run: node scripts\/check-sea-entropy\.mjs\s*$/m);
-    expect(workflow, "the control run (snapshot taken after both are called) is what shows the fix")
+  it.each(Object.entries(binaryWorkflows))("🔴 %s builds all four binaries and runs the probe, the control and the binary checks", (_, w) => {
+    expect(w).toMatch(/^\s*- run: node scripts\/build-sea\.mjs --all\s*$/m);
+    expect(w).toMatch(/^\s*- run: node scripts\/check-sea-entropy\.mjs\s*$/m);
+    expect(w, "the control run (snapshot taken after both are called) is what shows the fix")
       .toMatch(/SEA_OPTIONS_OVERRIDE: '\{"useSnapshot":true\}'\s*\n\s*SEA_SNAPSHOT_WARMUP: "1"/);
+    expect(w).toMatch(/run: bash scripts\/check-sea-binaries\.sh\s*$/m);
+  });
+
+  it("🔴 sea-check runs on pull requests that can change the binary, read-only, on a GitHub-hosted runner", () => {
+    expect(prCheck).toMatch(/^on:\s*\n\s+pull_request:/m);
+    for (const p of [".nvmrc", '"scripts/**"', '"package*.json"', "tsconfig.json", '"src/**"', ".github/workflows/sea-check.yml",
+      ".github/workflows/release-binaries.yml"]) expect(prCheck, `paths must include ${p}`).toContain(`- ${p}`);
+    expect(prCheck).toMatch(/^permissions:\s*\n\s+contents: read\s*$/m);
+    expect(prCheck, "this repo is public: no secrets in a pull_request workflow").not.toMatch(/\bsecrets\b/);
+    expect(prCheck, "pull_request_target/workflow_run run fork code with the base repo's token").not.toMatch(/pull_request_target|workflow_run/);
+    expect(prCheck).not.toMatch(/:\s*write\b/);
+    expect(prCheck).toMatch(/persist-credentials: false/);
+    expect(prCheck).toMatch(/runs-on: macos-14\b/);
+    expect(prCheck).not.toMatch(/self-hosted/);
+  });
+
+  it("🔴 the entropy probe measures the options build-sea ships", () => {
     const probe = readFileSync(join(root, "scripts", "check-sea-entropy.mjs"), "utf8");
     for (const v of ["SEA_OPTIONS_OVERRIDE", "SEA_SNAPSHOT_WARMUP"]) expect(probe).toContain(`process.env.${v}`);
     for (const f of ["build-sea.mjs", "check-sea-entropy.mjs"]) {

@@ -1,0 +1,34 @@
+# The binary checks of release-binaries.yml, on the pull request: a failure there happens after the
+# release is public. Builds the four SEA binaries and checks them; nothing is signed or uploaded.
+name: SEA check
+on:
+  pull_request:
+    paths:
+      - .nvmrc
+      - "scripts/**"
+      - "package*.json"
+      - tsconfig.json
+      - "src/**"
+      - .github/workflows/sea-check.yml
+      - .github/workflows/release-binaries.yml
+permissions:
+  contents: read
+jobs:
+  binaries:
+    runs-on: macos-14   # GitHub-hosted, as in release-binaries.yml; this repo is public
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # the steps below run PR code; nothing here pushes
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/build-sea.mjs --all
+      - run: node scripts/check-sea-entropy.mjs
+      - run: node scripts/check-sea-entropy.mjs
+        env:
+          SEA_OPTIONS_OVERRIDE: '{"useSnapshot":true}'
+          SEA_SNAPSHOT_WARMUP: "1"
+      - run: bash scripts/check-sea-binaries.sh
