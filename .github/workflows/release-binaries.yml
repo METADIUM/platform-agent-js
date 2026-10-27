@@ -17,11 +17,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node scripts/build-sea.mjs --all
-      # CVE-2026-106074: a SEA can repeat randomUUID()/randomInt() on every run (key.ts takes jti
-      # from randomUUID). Builds a probe SEA with this node; red on repeat.
-      # First run: the release options (catches a change that turns the snapshot on). Second run:
-      # a snapshot that calls both before it is taken - repeats on 22.23.2, so green means this
-      # node carries the fix.
+      # CVE-2026-106074 (jti comes from randomUUID): the probe with the release options, then its control.
       - run: node scripts/check-sea-entropy.mjs
       - run: node scripts/check-sea-entropy.mjs
         env:

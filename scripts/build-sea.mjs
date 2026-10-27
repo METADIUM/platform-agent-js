@@ -24,6 +24,13 @@ function run(cmd, args, opts = {}) {
   execFileSync(cmd, args, { stdio: "inherit", cwd: ROOT, ...opts });
 }
 
+// `--config-only` prints the sea-config this build writes and exits; node-pin.test.ts compares it with SEA_OPTIONS.
+const SEA_CONFIG = { main: "dist-bin/sea-bundle.cjs", output: "dist-bin/sea-prep.blob", ...SEA_OPTIONS };
+if (process.argv.includes("--config-only")) {
+  console.log(JSON.stringify(SEA_CONFIG));
+  process.exit(0);
+}
+
 // 1) 단일 CJS 번들 (SEA main은 CommonJS 단일 파일이어야 함)
 mkdirSync(OUT, { recursive: true });
 // 🔴 **판을 번들에 박는다.** SEA 에는 읽을 package.json 이 없어 `--version` 이 exit 1 로
@@ -37,11 +44,7 @@ run("npx", ["esbuild", "src/cli.ts", "--bundle", "--platform=node", "--format=cj
   "--banner:js=const __sea_meta_url = require('url').pathToFileURL(__filename).href;"]);
 
 // 2) SEA blob (교차 주입 가능: useCodeCache/useSnapshot 비활성)
-writeFileSync(join(OUT, "sea-config.json"), JSON.stringify({
-  main: "dist-bin/sea-bundle.cjs",
-  output: "dist-bin/sea-prep.blob",
-  ...SEA_OPTIONS,
-}));
+writeFileSync(join(OUT, "sea-config.json"), JSON.stringify(SEA_CONFIG));
 run(process.execPath, ["--experimental-sea-config", "dist-bin/sea-config.json"]);
 // 🔴 **판이 번들에 실제로 박혔는지 여기서 즉시 확인한다.** 빌드가 판을 못 박으면
 //    바이너리는 v0.5.1 과 **같은 실패**(`--version` 이 exit 1)를 내는데, 그것을 릴리스

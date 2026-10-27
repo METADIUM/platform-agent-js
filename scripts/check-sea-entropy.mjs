@@ -21,6 +21,11 @@ import { SEA_OPTIONS } from "./sea-options.mjs";
 const ROOT = new URL("..", import.meta.url).pathname;
 const RUNS = 3;
 const options = { ...SEA_OPTIONS, ...JSON.parse(process.env.SEA_OPTIONS_OVERRIDE ?? "{}") };
+const seaConfig = { main: "probe.cjs", output: "probe.blob", ...options };
+if (process.argv.includes("--config-only")) { // read by node-pin.test.ts
+  console.log(JSON.stringify(seaConfig));
+  process.exit(0);
+}
 const dir = mkdtempSync(join(tmpdir(), "sea-entropy-"));
 const run = (cmd, args) => execFileSync(cmd, args, { cwd: dir, stdio: ["ignore", "pipe", "inherit"] });
 
@@ -36,7 +41,7 @@ v8.startupSnapshot.setDeserializeMainFunction(print);`
     : "print();"}
 `;
   writeFileSync(join(dir, "probe.cjs"), probe);
-  writeFileSync(join(dir, "sea-config.json"), JSON.stringify({ main: "probe.cjs", output: "probe.blob", ...options }));
+  writeFileSync(join(dir, "sea-config.json"), JSON.stringify(seaConfig));
   run(process.execPath, ["--experimental-sea-config", "sea-config.json"]);
 
   const bin = join(dir, "probe");

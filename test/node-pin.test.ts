@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -73,13 +75,16 @@ describe("the Node version the release is built with", () => {
     expect(prCheck).not.toMatch(/self-hosted/);
   });
 
-  it("🔴 the entropy probe measures the options build-sea ships", () => {
+  it("🔴 the entropy probe measures the options build-sea ships", async () => {
+    const { SEA_OPTIONS } = await import(pathToFileURL(join(root, "scripts", "sea-options.mjs")).href);
+    const env = { ...process.env };
+    delete env.SEA_OPTIONS_OVERRIDE;
+    for (const f of ["build-sea.mjs", "check-sea-entropy.mjs"]) {
+      const out = execFileSync(process.execPath, [join(root, "scripts", f), "--config-only"], { env, encoding: "utf8" });
+      const { main: _m, output: _o, ...options } = JSON.parse(out);
+      expect(options, `${f} writes a sea-config whose options are not SEA_OPTIONS`).toEqual({ ...SEA_OPTIONS });
+    }
     const probe = readFileSync(join(root, "scripts", "check-sea-entropy.mjs"), "utf8");
     for (const v of ["SEA_OPTIONS_OVERRIDE", "SEA_SNAPSHOT_WARMUP"]) expect(probe).toContain(`process.env.${v}`);
-    for (const f of ["build-sea.mjs", "check-sea-entropy.mjs"]) {
-      const src = readFileSync(join(root, "scripts", f), "utf8");
-      expect(src, `${f} must take its SEA options from sea-options.mjs`).toContain('from "./sea-options.mjs"');
-      expect(src, `${f} sets useSnapshot itself, so the probe may not measure the release`).not.toMatch(/useSnapshot\s*:/);
-    }
   });
 });
