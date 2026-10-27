@@ -113,6 +113,10 @@ previous version is still in place and still running.
 npm install @metadium-did/platform-agent-js
 ```
 
+The npm package (library or `npx`) runs on **your** Node. Use a Node with the October 2026 security
+fixes, **22.23.4+ or 24.22.1+**: the client talks to remote servers through `fetch`, which
+decompresses Brotli responses (CVE-2026-111497). The single binary embeds Node 22.23.4 from 0.11.4.
+
 ## Library API — a session token for a stored delegation
 
 The programmatic entry point is **ESM `dist/index.js` with types in `dist/index.d.ts`**.

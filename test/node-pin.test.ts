@@ -31,4 +31,29 @@ describe("the Node version the release is built with", () => {
     // A literal `node-version:` alongside it would win or conflict depending on ordering.
     expect(workflow).not.toMatch(/^\s*node-version:\s*\S/m);
   });
+
+  // The first patch of each line that fixes the October 2026 Node security release
+  // (CVE-2026-111497 Brotli, CVE-2026-106074 SEA entropy). A new major needs its own entry.
+  const FIXED_IN: Record<string, string> = { "22": "22.23.4", "24": "24.22.1" };
+  const num = (v: string) => v.split(".").map(Number);
+  const atLeast = (v: string, min: string) => {
+    const [a, b] = [num(v), num(min)];
+    for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
+    return true;
+  };
+
+  it("🔴 is not older than the October 2026 security release for its line", () => {
+    const min = FIXED_IN[nvmrc.split(".")[0]];
+    expect(min, `no known fixed version for Node ${nvmrc}; add the line to FIXED_IN`).toBeDefined();
+    expect(atLeast(nvmrc, min), `.nvmrc ${nvmrc} predates ${min}, which the release binaries need`).toBe(true);
+  });
+
+  it("🔴 the entropy probe runs in the release and measures the options build-sea ships", () => {
+    expect(workflow).toMatch(/^\s*- run: node scripts\/check-sea-entropy\.mjs\s*$/m);
+    for (const f of ["build-sea.mjs", "check-sea-entropy.mjs"]) {
+      const src = readFileSync(join(root, "scripts", f), "utf8");
+      expect(src, `${f} must take its SEA options from sea-options.mjs`).toContain('from "./sea-options.mjs"');
+      expect(src, `${f} sets useSnapshot itself, so the probe may not measure the release`).not.toMatch(/useSnapshot\s*:/);
+    }
+  });
 });

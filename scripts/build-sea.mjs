@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
+import { SEA_OPTIONS } from "./sea-options.mjs";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const OUT = join(ROOT, "dist-bin");
@@ -39,9 +40,7 @@ run("npx", ["esbuild", "src/cli.ts", "--bundle", "--platform=node", "--format=cj
 writeFileSync(join(OUT, "sea-config.json"), JSON.stringify({
   main: "dist-bin/sea-bundle.cjs",
   output: "dist-bin/sea-prep.blob",
-  disableExperimentalSEAWarning: true,
-  useCodeCache: false,
-  useSnapshot: false,
+  ...SEA_OPTIONS,
 }));
 run(process.execPath, ["--experimental-sea-config", "dist-bin/sea-config.json"]);
 // 🔴 **판이 번들에 실제로 박혔는지 여기서 즉시 확인한다.** 빌드가 판을 못 박으면

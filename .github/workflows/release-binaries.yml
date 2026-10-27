@@ -17,6 +17,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node scripts/build-sea.mjs --all
+      # CVE-2026-106074: a SEA can repeat randomUUID()/randomInt() on every run (key.ts takes jti
+      # from randomUUID). Builds a probe SEA with this node and build-sea's options; red on repeat.
+      - run: node scripts/check-sea-entropy.mjs
       # 🔴 **바이너리가 자기 판을 말하는지 여기서 잠근다.** v0.5.1 바이너리는 `--version` 이
       #    exit 1 로 «판을 읽지 못했다» 를 냈는데(SEA 에는 package.json 이 없다) 릴리스가
       #    그대로 나갔다 — 아무도 **자산을 받아 돌려 보지 않았기** 때문이다.
