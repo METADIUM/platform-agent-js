@@ -50,7 +50,10 @@ describe("the Node version the release is built with", () => {
 
   it("🔴 the entropy probe runs in the release and measures the options build-sea ships", () => {
     expect(workflow).toMatch(/^\s*- run: node scripts\/check-sea-entropy\.mjs\s*$/m);
-    expect(workflow, "the control run (snapshot taken after both are called) is what shows the fix").toContain('SEA_SNAPSHOT_WARMUP: "1"');
+    expect(workflow, "the control run (snapshot taken after both are called) is what shows the fix")
+      .toMatch(/SEA_OPTIONS_OVERRIDE: '\{"useSnapshot":true\}'\s*\n\s*SEA_SNAPSHOT_WARMUP: "1"/);
+    const probe = readFileSync(join(root, "scripts", "check-sea-entropy.mjs"), "utf8");
+    for (const v of ["SEA_OPTIONS_OVERRIDE", "SEA_SNAPSHOT_WARMUP"]) expect(probe).toContain(`process.env.${v}`);
     for (const f of ["build-sea.mjs", "check-sea-entropy.mjs"]) {
       const src = readFileSync(join(root, "scripts", f), "utf8");
       expect(src, `${f} must take its SEA options from sea-options.mjs`).toContain('from "./sea-options.mjs"');
