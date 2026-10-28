@@ -36,4 +36,21 @@ describe("the agent fingerprint as the CLI prints it", () => {
     expect(printed, "bare 10 hex looks different from every screen the user compares it with")
       .not.toContain(key.fingerprint);
   });
+
+  it("`status` leads with the same grouped value", async () => {
+    const d = mkdtempSync(join(tmpdir(), "mpa-fp-"));
+    dirs.push(d);
+    const file = join(d, "key.json");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const out: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void out.push(a.join(" ")));
+    expect(await main(["did", "--key-file", file])).toBe(0);
+    const key = await AgentKey.fromPrivateJwk(loadStore(file)!.privateJwk!);
+    out.length = 0;
+
+    await main(["status", "--key-file", file]);
+
+    expect(out[0], "status is where a user checks which agent this machine is").toMatch(
+      new RegExp(`^에이전트 지문 ${groupFingerprint(key.fingerprint)}  ·  daemon: `));
+  });
 });

@@ -810,7 +810,7 @@ export async function main(argv: string[]): Promise<number> {
     const { key, created } = await keyFrom(store);
     console.log(key.did);
     // 모든 did:jwk는 앞자리가 같아 육안 구분 불가 — 에이전트 페이지가 표시하는 지문과 1:1 대조용.
-    console.error(`에이전트 지문: ${groupFingerprint(key.fingerprint)} (서비스 화면의 에이전트 지문과 대조 · 지갑 앱이 앞 4자를 물어봅니다)`);
+    console.error(`에이전트 지문: ${groupFingerprint(key.fingerprint)} (서비스 화면의 에이전트 지문과 대조)`);
     if (created) console.error(`(신규 키 생성·저장: ${store.location})`);
     return 0;
   }
