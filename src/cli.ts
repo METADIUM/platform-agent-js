@@ -14,7 +14,7 @@ import { downloadVerified, freeBytes, latestTag, planUpgrade, type UpgradeIo } f
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { hostname } from "node:os";
-import { AgentKey } from "./key.js";
+import { AgentKey, groupFingerprint } from "./key.js";
 import { DelegationSessionAuth, type SessionState } from "./delegation-session.js";
 import { exchangeSessionToken } from "./session.js";
 import { fetchRpEntry, pairV1, requireV1, RpEntryError, type RpEntry } from "./rp-entry.js";
@@ -810,7 +810,7 @@ export async function main(argv: string[]): Promise<number> {
     const { key, created } = await keyFrom(store);
     console.log(key.did);
     // 모든 did:jwk는 앞자리가 같아 육안 구분 불가 — 에이전트 페이지가 표시하는 지문과 1:1 대조용.
-    console.error(`지문: ${key.fingerprint} (Briefick 에이전트 페이지의 지문과 대조)`);
+    console.error(`에이전트 지문: ${groupFingerprint(key.fingerprint)} (서비스 화면의 에이전트 지문과 대조)`);
     if (created) console.error(`(신규 키 생성·저장: ${store.location})`);
     return 0;
   }
@@ -936,7 +936,7 @@ export async function main(argv: string[]): Promise<number> {
       if (args.code) {
         await pairV1({ resource: entry.resource, path: entry.pairing, key, code: args.code, label: registerLabel(args),
           version: packageVersion() ?? undefined });
-        console.log(`✅ /1 페어링 완료 — 지문 ${key.fingerprint} (RP 화면의 지문과 대조)`);
+        console.log(`✅ /1 페어링 완료 — 에이전트 지문 ${groupFingerprint(key.fingerprint)} (RP 화면의 에이전트 지문과 대조)`);
       }
     } catch (e) {
       if (e instanceof RpEntryError) return fail(e.message);
@@ -952,7 +952,7 @@ export async function main(argv: string[]): Promise<number> {
     saveConfig(dir, cfg);
     const token = ensureToken(dir);
     const port = cfg.port ?? 8787;
-    console.log(`✅ RP 추가: ${alias} → ${url}\n  지문: ${key.fingerprint}`);
+    console.log(`✅ RP 추가: ${alias} → ${url}\n  에이전트 지문: ${groupFingerprint(key.fingerprint)}`);
     console.log(`\nClaude Code 등록(복사-실행):`);
     console.log(`  ${mcpAddCommand(alias, port, shownToken(token, dir, Boolean(process.stdout.isTTY)), cfg.rps.length === 1)}`);
     if (cfg.rps.length > 1) {
@@ -1009,7 +1009,7 @@ export async function main(argv: string[]): Promise<number> {
       // stopped
     }
     const sessions = await daemonSessions(port, token);
-    console.log(`agent ${key ? key.fingerprint : "(키 없음)"}  ·  daemon: ${daemon}`);
+    console.log(`에이전트 지문 ${key ? groupFingerprint(key.fingerprint) : "(키 없음)"}  ·  daemon: ${daemon}`);
     if (cfg.rps.length === 0) {
       console.log("  등록된 RP 없음 — add <RP_URL> --verifier <검증자 URL> --code <CODE> 로 시작하세요");
       return 0;
@@ -1155,7 +1155,7 @@ export async function main(argv: string[]): Promise<number> {
       saveConfig(dir, cfg);
     }
     console.error(`✅ 에이전트 데몬 실행: 127.0.0.1:${daemon.port} (RP ${targets.length}개, 로컬 토큰 필수)`);
-    console.error(`   에이전트 지문: ${key.fingerprint}`);
+    console.error(`   에이전트 지문: ${groupFingerprint(key.fingerprint)}`);
     for (const line of upRegistrationLines(cfg, daemon.port, token, dir, Boolean(process.stderr.isTTY))) console.error(line);
     console.error("\n(Ctrl+C 로 종료 · 상태는 다른 터미널에서 `status`)");
     const stop = async () => {
