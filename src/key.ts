@@ -18,6 +18,11 @@ export function didFingerprint(did: string): string {
   return createHash("sha256").update(did, "utf8").digest("hex").slice(0, 10);
 }
 
+/** How every screen shows it (keepin, Briefick, MiniPaaS): two groups of five, e.g. "ecece 7c037". */
+export function groupFingerprint(fingerprint: string): string {
+  return fingerprint.length === 10 ? `${fingerprint.slice(0, 5)} ${fingerprint.slice(5)}` : fingerprint;
+}
+
 /** 공개 JWK → did:jwk. JSON 키순서(crv,kty,x,y) 고정으로 platform-java와 바이트 동일. */
 export function didJwkFromPublicJwk(pub: JWK): string {
   if (pub.kty !== "EC" || pub.crv !== "P-256" || !pub.x || !pub.y) {
